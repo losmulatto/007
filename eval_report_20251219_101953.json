@@ -1,0 +1,48 @@
+[
+  {
+    "id": "fin_01",
+    "name": "Mandatory Python for Totals",
+    "category": "Talous",
+    "passed": false,
+    "response_time": 0.007148027420043945,
+    "found_keywords": [],
+    "missing_keywords": [
+      "palkat",
+      "2024"
+    ],
+    "agent_used": null,
+    "tools_used": [],
+    "response_preview": ""
+  },
+  {
+    "id": "fin_02",
+    "name": "Numeric Integrity Reject (Guessing)",
+    "category": "Talous",
+    "passed": false,
+    "response_time": 0.0025649070739746094,
+    "found_keywords": [],
+    "missing_keywords": [
+      "Hylätty",
+      "REJECT",
+      "lähde"
+    ],
+    "agent_used": null,
+    "tools_used": [],
+    "response_preview": ""
+  },
+  {
+    "id": "fin_03",
+    "name": "Source Attribution RAG",
+    "category": "Talous",
+    "passed": false,
+    "response_time": 0.0013859272003173828,
+    "found_keywords": [],
+    "missing_keywords": [
+      "STEA",
+      "kustannuspaikka"
+    ],
+    "agent_used": null,
+    "tools_used": [],
+    "response_preview": ""
+  }
+]

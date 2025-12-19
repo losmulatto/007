@@ -1,0 +1,114 @@
+[
+  {
+    "id": "basic_01",
+    "name": "Tervehdys",
+    "category": "Perustoiminnot",
+    "passed": false,
+    "response_time": 16.92299795150757,
+    "found_keywords": [
+      "Samha"
+    ],
+    "missing_keywords": [
+      "avustaja"
+    ],
+    "agent_used": null,
+    "tools_used": [],
+    "response_preview": "Hei! Olen Substance Abuse and Mental Health Association SAMHA ry:n pääkoordinaattori.\n\nTehtäväni on auttaa sinua löytämään oikeat ratkaisut, olipa kyseessä sitten tiedonhaku, hankeidean kehittäminen, "
+  },
+  {
+    "id": "basic_02",
+    "name": "Yleinen kysymys",
+    "category": "Perustoiminnot",
+    "passed": false,
+    "response_time": 7.989535093307495,
+    "found_keywords": [
+      "maahanmuuttaja"
+    ],
+    "missing_keywords": [
+      "nuor"
+    ],
+    "agent_used": null,
+    "tools_used": [],
+    "response_preview": "Samha ry:n missio on tukea erityisesti maahanmuuttajataustaisten ihmisten hyvinvointia sekä ehkäistä mielenterveys- ja päihdehaittoja.\n\nTeemme tätä tarjoamalla matalan kynnyksen tukea, joka on kulttuu"
+  },
+  {
+    "id": "deleg_01",
+    "name": "Delegoi tutkijalle",
+    "category": "Delegointi",
+    "passed": false,
+    "response_time": 46.032886028289795,
+    "found_keywords": [
+      "JALMA",
+      "ICAT"
+    ],
+    "missing_keywords": [
+      "KOUTSI"
+    ],
+    "agent_used": "tutkija",
+    "tools_used": [],
+    "response_preview": "Samhalla on käynnissä sekä jatkuvaa STEA-rahoitteista toimintaa että määräaikaisia kehittämis- ja yhteistyöhankkeita. Toiminnan ytimessä on aina matalan kynnyksen tuki, joka ei vaadi lähetteitä tai di"
+  },
+  {
+    "id": "deleg_02",
+    "name": "Delegoi sote-asiantuntijalle",
+    "category": "Delegointi",
+    "passed": true,
+    "response_time": 24.20374083518982,
+    "found_keywords": [
+      "masennus",
+      "tuki",
+      "kuuntel"
+    ],
+    "missing_keywords": [],
+    "agent_used": "sote_asiantuntija",
+    "tools_used": [],
+    "response_preview": "Kiitos kysymyksestäsi. On hienoa ja tärkeää, että haluat tukea nuorta – läheisen tuki on yksi merkittävimmistä voimavaroista toipumisessa.\n\nMasennus on yleinen mielenterveyden häiriö, joka vaikuttaa j"
+  },
+  {
+    "id": "deleg_03",
+    "name": "Delegoi yhdenvertaisuus-asiantuntijalle",
+    "category": "Delegointi",
+    "passed": true,
+    "response_time": 14.9379141330719,
+    "found_keywords": [
+      "rasis",
+      "rakent",
+      "syrjin"
+    ],
+    "missing_keywords": [],
+    "agent_used": "yhdenvertaisuus_asiantuntija",
+    "tools_used": [],
+    "response_preview": "Rakenteellinen rasismi tarkoittaa sitä, että eriarvoisuus ja syrjintä eivät johdu vain yksittäisten ihmisten asenteista, vaan ne ovat kietoutuneet yhteiskunnan rakenteisiin, käytäntöihin ja toimintata"
+  },
+  {
+    "id": "deleg_04",
+    "name": "Delegoi koulutussuunnittelijalle",
+    "category": "Delegointi",
+    "passed": true,
+    "response_time": 50.16201686859131,
+    "found_keywords": [
+      "harjoitus",
+      "minuutti",
+      "osallistuj"
+    ],
+    "missing_keywords": [],
+    "agent_used": "koulutussuunnittelija",
+    "tools_used": [],
+    "response_preview": "Tässä on yksityiskohtainen suunnitelma 30 minuutin tutustumiskokonaisuudeksi. Tämä on suunniteltu erityisesti Samhan arvojen mukaisesti: se on **matalan kynnyksen harjoitus**, joka on **kulttuurisensi"
+  },
+  {
+    "id": "deleg_05",
+    "name": "Delegoi kirjoittajalle",
+    "category": "Delegointi",
+    "passed": true,
+    "response_time": 30.684035062789917,
+    "found_keywords": [
+      "nuor",
+      "hyvinvoin"
+    ],
+    "missing_keywords": [],
+    "agent_used": "sote_asiantuntija",
+    "tools_used": [],
+    "response_preview": "Nuorten hyvinvointi on kokonaisuus, joka rakentuu turvallisista ihmissuhteista, mielekkäästä tekemisestä sekä tunteesta, että omiin asioihin voi vaikuttaa. Nuoruus on suurten muutosten aikaa, ja on tä"
+  }
+]
