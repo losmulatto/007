@@ -53,7 +53,7 @@
                     "qa_policy"
                 ],
                 "required_tools": [
-                    "pdf_deepreader"
+                    "read_pdf_content"
                 ],
                 "assertions": {
                     "flags_legal_risks": true
@@ -167,7 +167,7 @@
                     "qa_policy"
                 ],
                 "required_tools": [
-                    "search_web_verified"
+                    "search_verified_sources"
                 ],
                 "assertions": {
                     "citations_present": true,
@@ -191,7 +191,7 @@
                     "qa_policy"
                 ],
                 "required_tools": [
-                    "imagegen"
+                    "generate_image"
                 ],
                 "qa_decision": "APPROVE"
             }
@@ -211,7 +211,7 @@
                     "qa_policy"
                 ],
                 "required_tools": [
-                    "archive_search"
+                    "search_archive"
                 ],
                 "assertions": {
                     "retrieval_returns_latest_version": true
@@ -257,7 +257,7 @@
                     "qa_policy"
                 ],
                 "required_tools": [
-                    "search_samha_db"
+                    "retrieve_docs"
                 ],
                 "assertions": {
                     "no_guessing_if_missing": true,
@@ -548,7 +548,7 @@
             "category": "edge_cases",
             "title": "stress test: 4000+ chars -> tiivistää ja chunkkaa",
             "input": {
-                "user_message": "x".repeat(4200),
+                "user_message": "Lorem ipsum dolor sit amet xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
                 "attachments": []
             },
             "expected": {

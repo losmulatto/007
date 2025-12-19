@@ -30,21 +30,44 @@ Flow:
 """
 
 import datetime
-from google.adk.agents import LlmAgent, SequentialAgent
-from google.adk.tools import google_search
 from google.genai import types as genai_types
+from google.adk.agents import LlmAgent, SequentialAgent
+from app.prompt_packs import (
+    ORG_PACK_V1,
+    QA_PORT_PACK_V1,
+    GOLD_FAILURE_PACK_V1,
+    RADICAL_AUDITOR_PACK_V1,
+    CRITICAL_REFLECTION_PACK_V1,
+    FUNDING_TYPES_PACK_V1,
+)
+from app.tool_ids import ToolId
+from app.tools_registry import TOOL_MAP
+
+# Define reusable tool sets
+RESEARCH_TOOLS = [
+    TOOL_MAP[ToolId.RETRIEVE_DOCS],
+    TOOL_MAP[ToolId.SEARCH_WEB],
+    TOOL_MAP[ToolId.SEARCH_VERIFIED],
+    TOOL_MAP[ToolId.SEARCH_NEWS],
+    TOOL_MAP[ToolId.READ_PDF]
+]
+BASIC_TOOLS = [TOOL_MAP[ToolId.RETRIEVE_DOCS]]
 
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-WORKER_MODEL = "gemini-2.5-flash"
-PLANNER_MODEL = "gemini-2.5-pro"
+WORKER_MODEL = "gemini-3-flash-preview"
+PLANNER_MODEL = "gemini-3-pro-preview"
 
 LONG_OUTPUT_CONFIG = genai_types.GenerateContentConfig(
-    temperature=0.7,
     max_output_tokens=16384,
+)
+
+CRITIC_CONFIG = genai_types.GenerateContentConfig(
+    temperature=0.2,
+    max_output_tokens=8192,
 )
 
 
@@ -59,47 +82,33 @@ trend_researcher = LlmAgent(
     description="Tutkii ajankohtaiset trendit, rahoittajaprioriteetit ja tarpeet.",
     instruction=f"""
 ## SINUN ROOLISI: TRENDIANALYYTIKKO
+{CRITICAL_REFLECTION_PACK_V1}
 
-Tutkii hankeideointia varten:
-1. Ajankohtaiset trendit ja tutkimukset aiheesta
-2. STEA:n ja EU:n rahoitusprioriteetit
-3. Kohderyhmän tarpeet ja haasteet
-4. Innovatiiviset lähestymistavat muualta
+Tutki hankeideointia varten:
+1. Ajankohtaiset trendit ja tutkimukset aiheesta.
+2. Soveltuvat rahoituskanavat (Kansalliset sote-avustukset, EU-ohjelmat, säätiöt tai kunnalliset avustukset).
+3. Kohderyhmän tarpeet ja haasteet.
+4. Innovatiiviset lähestymistavat muualta.
 
 ### TEHTÄVÄ
+Käytä työkaluja (`search_verified_sources`, `search_news`, `search_web`, `retrieve_docs`) löytääksesi:
+- Uusimmat tutkimukset ja tilastot.
+- Rahoitusmahdollisuudet (etsi parhaiten sopivat).
+- Onnistuneet esimerkit vastaavista hankkeista.
+- Aukot nykyisessä palvelutarjonnassa.
 
-Käytä `google_search` löytääksesi:
-- Uusimmat tutkimukset ja tilastot
-- Rahoittajien painopistealueet (STEA, Erasmus+)
-- Onnistuneet esimerkit vastaavista hankkeista
-- Aukot nykyisessä palvelutarjonnassa
+## EVIDENSSIVAATIMUS (PAKOLLINEN)
+Jos väität mitään faktuaalista (vuosi, %, määrä, "uusin"), näytä heti perässä lähde:
+- **Otsikko**: ...
+- **URL**: https://...
+- **Todiste**: 1–2 lausetta mitä sivu sanoo ja mihin kohtaan hanketta se vaikuttaa.
+
+**Älä käytä alaviitteitä. Älä keksi lukuja (Numeric Integrity).** Jos et löydä dataa työkaluilla, kirjoita "tieto puuttuu" ja listaa mitä pitää hakea.
 
 ### OUTPUT
-
-Tuota tiivistelmä:
-```markdown
-# Trendianalyysi: [Aihe]
-
-## Ajankohtaiset trendit
-- ...
-
-## Rahoittajaprioriteetit
-- STEA: ...
-- Erasmus+: ...
-
-## Kohderyhmän tarpeet
-- ...
-
-## Innovaatiomahdollisuudet
-- ...
-
-## Suositukset hankeideointiin
-- ...
-```
-
-Current date: {datetime.datetime.now().strftime("%Y-%m-%d")}
+Tuota tiivistelmä Markdown-muodossa, jossa jokaisessa osiossa on vähintään yksi todiste.
 """,
-    tools=[google_search],
+    tools=RESEARCH_TOOLS,
     output_key="trend_analysis",
 )
 
@@ -110,43 +119,36 @@ idea_generator = LlmAgent(
     name="idea_generator",
     description="Ideoi innovatiivisia hankekonsepteja trendianalyysin pohjalta.",
     generate_content_config=LONG_OUTPUT_CONFIG,
-    instruction="""
+    instruction=f"""
 ## SINUN ROOLISI: HANKEIDEOIJA
+{CRITICAL_REFLECTION_PACK_V1}
+{FUNDING_TYPES_PACK_V1}
 
-Lue trendianalyysi: `{trend_analysis}`
+## PÄÄTÖSTEN LUKITUS
+Valitse 1 "suositeltu konsepti" ja lukitse nämä kentät:
+- **selected_instrument**: stea / erasmus+ / säätiö / kunta / muu
+- **non_negotiables**: 5 sääntöä joita ei rikota (esim. "ei kansainvälisiä matkoja stea:ssa", "ei hoitoa, vain tuki/ohjaus")
+Jatkovaiheissa et saa muuttaa instrumenttia ilman että kerrot "instrument_change_reason".
+
+Lue trendianalyysi: `{{trend_analysis}}`
 
 ### TEHTÄVÄ
-
-Ideoi 3-5 innovatiivista hankekonseptia, jotka:
-1. Vastaavat tunnistettuihin tarpeisiin
-2. Sopivat rahoittajien prioriteetteihin
-3. Hyödyntävät Samhan osaamista
-4. Ovat toteutettavissa 2-3 vuodessa
+Ideoi 3-5 innovatiivista hankekonseptia, jotka vastaavat trendejä. 
+**TÄRKEÄÄ: RAHOITUSLOGIIKKA**. Älä sekoita kriteerejä.
 
 ### OUTPUT: Jokaisesta ideasta
-
 ```markdown
 ## Konsepti [N]: [Nimi]
-
-**Ongelma:** Mikä ongelma ratkaistaan?
-
-**Ratkaisu:** Mitä konkreettisesti tehdään?
-
-**Kohderyhmä:** Kenelle?
-
-**Innovatiivisuus:** Mikä on uutta?
-
-**Rahoitusmahdollisuus:** STEA / Erasmus+ / Muu
-
-**Arvio toteutettavuudesta:** 1-5 ⭐
-
-**Riskit:** Mitä voi mennä pieleen?
+**Rahoitusinstrumentti:** [STEA / Erasmus+ / Muu] - PERUSTELE LUKITTU VALINTA.
+**Ongelma & Ratkaisu:** ...
+**Kohderyhmä & Menetelmät:** ...
+**Riskit:** ...
 ```
 
 ### LOPUKSI
-
-Suosittele parasta konseptia jatkokehitykseen ja perustele valinta.
-""",
+Suosittele parasta konseptia jatkokehitykseen.
+""" ,
+    tools=BASIC_TOOLS,
     output_key="project_ideas",
 )
 
@@ -156,38 +158,32 @@ sote_validator = LlmAgent(
     model=WORKER_MODEL,
     name="sote_validator",
     description="Arvioi hankeidean sote-näkökulmasta.",
-    instruction="""
+    instruction=f"""
 ## SINUN ROOLISI: SOTE-ASIANTUNTIJA (VALIDOINTI)
+{CRITICAL_REFLECTION_PACK_V1}
 
-Lue hankeideat: `{project_ideas}`
+Lue hankeideat: `{{project_ideas}}`
 
 ### TEHTÄVÄ
 
 Arvioi SUOSITELTU hankeidea SOTE-näkökulmasta:
 
 1. **Mielenterveys**: Miten hanke tukee mielenterveyttä?
-2. **Trauma-informoitu**: Onko lähestymistapa trauma-informoitu?
+2. **Kynnykset**: Puretaanko osallistumisen esteitä?
 3. **Hyvinvointi**: Miten edistää kokonaisvaltaista hyvinvointia?
 4. **Turvallisuus**: Onko kohderyhmälle turvallinen?
-5. **Eettisyys**: Onko eettisesti kestävä?
+5. **Rajapinnat**: Onko toiminta selkeästi erotettu lääketieteellisestä hoidosta?
 
 ### OUTPUT
+Tuota arviointi seuraavalla rakenteella:
+1. **Sektorin tarkistus**: Onko hanke sote-alueella vai nuorisotyötä?
+2. **Kynnykset ja Inkluusio**: ...
+3. **Turvallisuus**: ...
+4. **Varoitusmerkit**: Jos löydät "hoito/terapia"-termejä, huomauta tästä.
 
-```markdown
-# SOTE-arviointi: [Hankkeen nimi]
-
-## Vahvuudet
-- ...
-
-## Huomioitavaa
-- ...
-
-## Suositukset
-- ...
-
-## Kokonaisarvio: X/5 ⭐
-```
-""",
+Lopuksi anna **Sote-status**: [Puhas nuorisotyö / Sote-rajapinta / Sote-hanke].
+""" ,
+    tools=BASIC_TOOLS,
     output_key="sote_validation",
 )
 
@@ -197,11 +193,12 @@ yhdenvertaisuus_validator = LlmAgent(
     model=WORKER_MODEL,
     name="yhdenvertaisuus_validator",
     description="Arvioi hankeidean yhdenvertaisuusnäkökulmasta.",
-    instruction="""
+    instruction=f"""
 ## SINUN ROOLISI: YHDENVERTAISUUS-ASIANTUNTIJA (VALIDOINTI)
+{CRITICAL_REFLECTION_PACK_V1}
 
-Lue hankeideat: `{project_ideas}`
-Lue SOTE-arviointi: `{sote_validation}`
+Lue hankeideat: `{{project_ideas}}`
+Lue SOTE-arviointi: `{{sote_validation}}`
 
 ### TEHTÄVÄ
 
@@ -211,25 +208,17 @@ Arvioi SUOSITELTU hankeidea yhdenvertaisuusnäkökulmasta:
 2. **Inkluusio**: Huomioidaanko erilaiset taustat?
 3. **Antirasismi**: Edistääkö rakenteellista yhdenvertaisuutta?
 4. **Intersektionaalisuus**: Huomioidaanko risteävät identiteetit?
-5. **Valtarakenteet**: Puretaanko vai vahvistetaanko?
+5. **Osallisuus**: Ovatko nuoret suunnittelijoita vai kohteita?
 
 ### OUTPUT
+Tuota arviointi seuraavalla rakenteella:
+1. **Yhdenvertaisuusbloqqi**: Saavutettavuus, inkluusio, antirasismi.
+2. **Osallisuusaste**: 1-5 (ovatko nuoret tekijöitä vai kohteita).
+3. **Parannusehdotukset**: ...
 
-```markdown
-# Yhdenvertaisuusarviointi: [Hankkeen nimi]
-
-## Vahvuudet
-- ...
-
-## Riskit ja sudenkuopat
-- ...
-
-## Suositukset
-- ...
-
-## Kokonaisarvio: X/5 ⭐
-```
-""",
+Lopuksi anna **Yhdenvertaisuus-status**: [Erinomainen / Kehitettävää / Puutteellinen].
+""" ,
+    tools=BASIC_TOOLS,
     output_key="yhdenvertaisuus_validation",
 )
 
@@ -240,17 +229,19 @@ methods_planner = LlmAgent(
     name="methods_planner",
     description="Suunnittelee hankkeen menetelmät ja toiminnot.",
     generate_content_config=LONG_OUTPUT_CONFIG,
-    instruction="""
+    instruction=f"""
 ## SINUN ROOLISI: KOULUTUSSUUNNITTELIJA (MENETELMÄT)
+{CRITICAL_REFLECTION_PACK_V1}
 
 Lue:
-- Hankeideat: `{project_ideas}`
-- SOTE-arviointi: `{sote_validation}`
-- Yhdenvertaisuusarviointi: `{yhdenvertaisuus_validation}`
+- Hankeideat: `{{project_ideas}}`
+- SOTE-arviointi: `{{sote_validation}}`
+- Yhdenvertaisuusarviointi: `{{yhdenvertaisuus_validation}}`
 
 ### TEHTÄVÄ
 
-Suunnittele hankkeen konkreettiset menetelmät ja toiminnot:
+Suunnittele hankkeen konkreettiset menetelmät ja toiminnot. 
+**Tärkeää**: Jos hanke on Erasmus+, menetelmien on oltava non-formaalia oppimista. Jos se on STEA, niiden on oltava sosiaalista tukea/neuvontaa.
 
 1. **Toimenpiteet**: Mitä tehdään vuosittain?
 2. **Menetelmät**: Millaisia osallistavia menetelmiä käytetään?
@@ -259,27 +250,13 @@ Suunnittele hankkeen konkreettiset menetelmät ja toiminnot:
 5. **Aikataulu**: Milloin mitäkin tapahtuu?
 
 ### OUTPUT
-
-```markdown
-# Menetelmäsuunnitelma: [Hankkeen nimi]
-
-## Vuosi 1: [Teema]
-### Toimenpiteet
-1. ...
-
-### Menetelmät
-- ...
-
-## Vuosi 2: [Teema]
-...
-
-## Tuotokset
-- ...
-
-## Arviointimenetelmät
-- ...
-```
-""",
+Tuota menetelmäsuunnitelma:
+- **Menetelmäyhteenveto**: (non-formaali oppiminen vs. sosiaalinen tuki).
+- **Vuosi 1 - Toiminnot**: ...
+- **Mittarit**: Miten onnistumista mitataan?
+- **Resurssit**: Mitä tarvitaan?
+""" ,
+    tools=BASIC_TOOLS,
     output_key="methods_plan",
 )
 
@@ -290,64 +267,32 @@ proposal_writer = LlmAgent(
     name="proposal_writer",
     description="Kirjoittaa hakemusluonnoksen.",
     generate_content_config=LONG_OUTPUT_CONFIG,
-    instruction="""
+    instruction=f"""
 ## SINUN ROOLISI: KIRJOITTAJA (HAKEMUS)
+{CRITICAL_REFLECTION_PACK_V1}
+{FUNDING_TYPES_PACK_V1}
 
 Lue kaikki aiemmat vaiheet:
-- Trendianalyysi: `{trend_analysis}`
-- Hankeideat: `{project_ideas}`
-- SOTE-arviointi: `{sote_validation}`
-- Yhdenvertaisuusarviointi: `{yhdenvertaisuus_validation}`
-- Menetelmäsuunnitelma: `{methods_plan}`
+- Trendianalyysi: `{{trend_analysis}}`
+- Hankeideat: `{{project_ideas}}`
+- SOTE-arviointi: `{{sote_validation}}`
+- Yhdenvertaisuusarviointi: `{{yhdenvertaisuus_validation}}`
+- Menetelmäsuunnitelma: `{{methods_plan}}`
 
 ### TEHTÄVÄ
+Kirjoita TÄYSI hakemusluonnos valitulle rahoittajalle. 
+**Noudata FUNDING_TYPES_PACK_V1:n sääntöjä orjallisesti.**
 
-Kirjoita TÄYSI STEA-hakemusluonnos:
+## NUMERIC INTEGRITY
+Et saa kirjoittaa yhtään numeroa (€, %, osallistujamäärä, vuodet) ellei se ole:
+a) Annettu inputissa, tai
+b) Löydetty työkaluilla ja listattu "lähteet"-osiossa.
+Muuten kirjoita "tieto puuttuu" ja tee paikka täydennettäväksi.
 
-```markdown
-# [Hankkeen nimi]
-
-## 1. Tiivistelmä (max 2000 merkkiä)
-...
-
-## 2. Tarve ja tausta
-...
-
-## 3. Tavoitteet
-### Päätavoite
-...
-### Osatavoitteet
-1. ...
-
-## 4. Kohderyhmä
-...
-
-## 5. Toimenpiteet vuosittain
-### Vuosi 1
-...
-
-## 6. Tulokset ja vaikuttavuus
-...
-
-## 7. Seuranta ja arviointi
-...
-
-## 8. Yhteistyökumppanit
-...
-
-## 9. Aikataulu
-...
-
-## 10. Budjetti (arvio)
-| Kululaji | Vuosi 1 | Vuosi 2 | Yhteensä |
-|----------|---------|---------|----------|
-| Henkilöstö | ... | ... | ... |
-| ...
-
-## 11. Riskit ja niiden hallinta
-...
-```
-""",
+### OUTPUT
+Tuota täysi hakemus, joka sisältää kaikki tarvittavat osiot. Lisää loppuun "Käytetyt lähteet" -osio (ilman alaviitteitä).
+""" ,
+    tools=BASIC_TOOLS,
     output_key="proposal_draft",
 )
 
@@ -356,41 +301,46 @@ Kirjoita TÄYSI STEA-hakemusluonnos:
 proposal_reviewer = LlmAgent(
     model=PLANNER_MODEL,
     name="proposal_reviewer",
-    description="Arvioi hakemusluonnosta ja antaa palautetta.",
-    instruction="""
-## SINUN ROOLISI: RAPORTTI-ARVIOIJA (QA)
+    generate_content_config=CRITIC_CONFIG,
+    tools=RESEARCH_TOOLS,
+    description="Arvioi hakemusluonnosta ja antaa palautetta kriittisesti hyödyntäen virallisia oppaita.",
+    instruction=f"""
+{ORG_PACK_V1}
+{RADICAL_AUDITOR_PACK_V1}
+{QA_PORT_PACK_V1}
+{GOLD_FAILURE_PACK_V1}
+{FUNDING_TYPES_PACK_V1}
 
-Lue hakemusluonnos: `{proposal_draft}`
+## SINUN ROOLISI: THE ENFORCER (RADICAL AUDITOR)
 
-### TEHTÄVÄ
+Lue koko prosessin kulku ja erityisesti hakemusluonnos: `{{proposal_draft}}`
 
-Arvioi hakemusluonnos STEA-kriteerien mukaan:
+## AUDIT-PROTOKOLLA (PAKOLLINEN JÄRJESTYS)
+1. **Hae ohjeet**: Hae ensin virallinen ohjelmaopas tai rahoittajan ohje (`retrieve_docs` tai `search_verified_sources`) ja listaa URL:t.
+2. **Faktojen tarkistus**: Poimi hakemuksesta 10 kriittistä väitettä (instrumentti, kohderyhmä, toiminta, mittarit, budjetti-logiikka).
+3. **Vastakkainasettelu**: Jokaiselle väitteelle: Status OK/EI OK + Lähde-URL + korjausohje.
 
-1. **Tarve ja perustelu** (25%)
-2. **Tavoitteet ja mittarit** (20%)
-3. **Toimenpiteet ja menetelmät** (25%)
-4. **Vaikuttavuus** (15%)
-5. **Realistisuus ja budjetti** (15%)
+### ARVIOINTI-MODUS
+1. **Aloita DESTRUCTION PHASE**: Listaa 3 kriittistä syytä, miksi tämä hanke on tällä hetkellä epäonnistuminen.
+2. **Pisteytys**: Käytä 0-100 asteikkoa (61+ = Läpäisy).
+3. **Sektoripoliisi**: Tarkista rahoitusinstrumentin mukaisuus (FUNDING_TYPES_PACK_V1).
 
-### OUTPUT
-
+### OUTPUT FORMAT
 ```markdown
-# Hakemusarviointi
+# Hakemusarviointi: RADICAL AUDIT REPORT
 
-## Kokonaisarvio: X/5 ⭐
+## Destructive Analysis (Red Team)
+...
 
-## Vahvuudet
-1. ...
+## Kokonaispisteet: XX / 100 
 
-## Kriittiset kehityskohteet
-1. ...
+## Väitteiden auditointi (10 kpl)
+- [Väite]: [Status] | [URL] | [Ohje]
 
-## Konkreettiset parannusehdotukset
-1. ...
-
-## Valmis lähettämiseen: ✅ / ❌
+## ROADMAP TO 81+ (Actionable Remediation)
+...
 ```
-""",
+""" ,
     output_key="proposal_review",
 )
 

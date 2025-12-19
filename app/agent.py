@@ -41,6 +41,11 @@ LONG_OUTPUT_CONFIG = genai_types.GenerateContentConfig(
     max_output_tokens=32768,  # 32k tokens for long articles/plans
 )
 
+CRITIC_CONFIG = genai_types.GenerateContentConfig(
+    temperature=0.2,
+    max_output_tokens=8192,
+)
+
 from app.retrievers import get_compressor, get_retriever
 from app.templates import format_docs
 from app.hard_gates import detect_gate_signals
@@ -50,6 +55,11 @@ from app.prompt_packs import (
     YHDENVERTAISUUS_PACK_V1,
     WRITER_PACK_V1,
     KOULUTUS_PACK_V1,
+    QA_PORT_PACK_V1,
+    GOLD_FAILURE_PACK_V1,
+    RADICAL_AUDITOR_PACK_V1,
+    CRITICAL_REFLECTION_PACK_V1,
+    FUNDING_TYPES_PACK_V1,
 )
 from app.deep_search import syvahaku_agent
 from app.hankesuunnittelija import hankesuunnittelija_agent
@@ -62,44 +72,13 @@ from app.kumppanit import kumppanit_agent
 
 # Import Agent Registry
 from app.agents_registry import SAMHA_AGENT_REGISTRY, get_agent_def, DOMAIN_EXPERT, RESEARCH, OUTPUT
+from app.tool_ids import ToolId
 
 # Import QA Policy
 from app.qa_policy import qa_policy_agent
 
-# Import Shared Tools
-from app.tools_base import (
-    retrieve_docs, read_excel, read_csv, analyze_excel_summary, list_excel_sheets
-)
-from app.web_search import search_web, search_verified_sources, search_news
-from app.pdf_tools import read_pdf_content, get_pdf_metadata
-from app.advanced_tools import process_meeting_transcript, generate_data_chart, schedule_samha_meeting
-from app.image_tools import generate_samha_image
 
-# Mock archive tools
-def save_to_archive(content: str, metadata: dict) -> str: return "Saved to archive."
-def search_archive(query: str) -> str: return "Archive search results."
-def get_archived_content(doc_id: str) -> str: return "Archived content."
-
-# --- TOOL MAPPING ---
-TOOL_MAP = {
-    "retrieve_docs": retrieve_docs,
-    "search_web": search_web,
-    "search_verified_sources": search_verified_sources,
-    "search_news": search_news,
-    "read_pdf_content": read_pdf_content,
-    "get_pdf_metadata": get_pdf_metadata,
-    "process_meeting_transcript": process_meeting_transcript,
-    "generate_data_chart": generate_data_chart,
-    "schedule_samha_meeting": schedule_samha_meeting,
-    "generate_image": generate_samha_image,
-    "image_generation": generate_samha_image,
-    "save_to_archive": save_to_archive,
-    "search_archive": search_archive,
-    "get_archived_content": get_archived_content,
-    "read_excel": read_excel,
-    "read_csv": read_csv,
-    "analyze_excel_summary": analyze_excel_summary,
-}
+from app.tools_registry import TOOL_MAP
 
 def get_tools_for_agent(agent_id: str):
     if agent_id not in SAMHA_AGENT_REGISTRY:
@@ -110,7 +89,8 @@ def get_tools_for_agent(agent_id: str):
 EMBEDDING_MODEL = "text-embedding-005"
 LLM_LOCATION = "global"
 LOCATION = "us-central1"
-LLM = "gemini-3-pro-preview"
+LLM = "gemini-3-flash-preview"
+LLM_PRO = "gemini-3-pro-preview"
 
 credentials, project_id = google.auth.default()
 os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
@@ -123,46 +103,103 @@ from app.tools_base import retriever, compressor, embeddings
 from app.pii_scrubber import pii_scrubber
 from app.hard_gates import detect_gate_signals, enforce_gates
 
+from app.tools_registry import FUNCTION_NAME_TO_TOOL_ID
+from app.observability import log_tool_trace, resolve_agent_name, append_security_event
+
 # --- TOOL ACCESS ENFORCEMENT ---
 async def enforce_tool_matrix(context=None, tool_call=None, **kwargs):
-    """Callback to enforce least-privilege tool access."""
-    ctx = context or kwargs.get('callback_context')
-    tc = tool_call or kwargs.get('tool_call')
-    if ctx is None or tc is None: return None
+    """Callback to enforce least-privilege tool access (Deny By Default)."""
+    ctx = context or kwargs.get('callback_context') or kwargs.get('context') or kwargs.get('invocation_context') or kwargs.get('tool_context')
+    tc = tool_call or kwargs.get('tool_call') or kwargs.get('tool')
     
-    agent_id = ctx.agent.name
-    tool_name = tc.function_call.name
-    
-    # Koordinaattori always allowed to transfer
-    if tool_name == "transfer_to_agent":
+    if ctx is None or tc is None: 
+        # print(f" [ENFORCE SKIP] Missing ctx={bool(ctx)} or tc={bool(tc)}")
         return None
-        
+    
+    # Resolve agent name
+    agent_id = resolve_agent_name(ctx)
+    
+    # Resolve tool name
+    tool_name = "unknown"
+    if hasattr(tc, "function_call") and tc.function_call:
+        tool_name = tc.function_call.name
+    elif hasattr(tc, "name"):
+        tool_name = tc.name
+    
+    print(f" [ENFORCE] agent='{agent_id}' tool='{tool_name}'")
+    
+    # Resolve tool name to ToolId
+    tool_id = FUNCTION_NAME_TO_TOOL_ID.get(tool_name)
+    
+    # SYSTEM OVERRIDE: transfer_to_agent is always allowed
+    if tool_id == ToolId.TRANSFER:
+        return None
+
+    # Error: Unmapped tool (security risk)
+    if not tool_id:
+        print(f"SECURITY ALERT: Unmapped tool '{tool_name}' called by '{agent_id}'")
+        return f"ERROR: tool_denied. Tool '{tool_name}' is unmapped in Samha registry."
+
+    # Deny if agent not in registry
     if agent_id not in SAMHA_AGENT_REGISTRY:
-        return None # Coordinator or unknown
-        
+        return f"ERROR: tool_denied. Agent '{agent_id}' is not in registry."
+
+    # Check Registry Allowlist
     allowed = SAMHA_AGENT_REGISTRY[agent_id].allowed_tools
-    if tool_name not in allowed:
+    if tool_id not in allowed:
         print(f"SECURITY ALERT: Agent '{agent_id}' tried to use unauthorized tool '{tool_name}'")
+        
+        # Log to security_events
+        from app.observability import append_security_event
+        append_security_event(ctx, "tool_denied", {"tool": tool_name})
+            
         return f"ERROR: tool_denied. Agent '{agent_id}' is not authorized to use tool '{tool_name}'."
     
     return None
 
 # --- HARD GATES CALLBACK ---
+# --- HARD GATES CALLBACK ---
 async def hard_gate_callback(context=None, **kwargs):
-    """Callback for Koordinaattori to force RAG/Web research if factual signals detected."""
+    """Callback to write Hard Gate signals to State."""
     ctx = context or kwargs.get('callback_context')
     if ctx is None: return
     
     try:
-        events = getattr(ctx, 'session', None).events if hasattr(ctx, 'session') else []
-        last_msg = events[-1].content.parts[0].text if events else ""
+        session = getattr(ctx, 'session', None)
+        events = session.events if session else []
+        last_msg = ""
+        if events:
+            # Must handle None parts or empty text
+            last_event = events[-1]
+            if last_event.content and last_event.content.parts:
+                last_msg = last_event.content.parts[0].text or ""
+        
         signals = detect_gate_signals(last_msg)
         
-        if signals.rag_required:
-            print(f"HARD GATE TRIGGERED: rag_required=True for query: '{last_msg[:50]}'")
-            hint = "\n[SYSTEM HINT]: Tämä pyyntö sisältää faktuaalisia suuria (vuosia, euroja tms). SINUN ON käytettävä 'tutkija' agenttia tai 'retrieve_docs' työkalua faktojen varmistamiseen."
-            if hasattr(ctx, 'instruction') and ctx.instruction is not None:
-                ctx.instruction += hint
+        # Write to State (Phase 1.9)
+        if session and hasattr(session, "state"):
+            # Safe extraction of signals
+            active_signals = []
+            try:
+                # Try pydantic v2 or v1
+                sig_dict = signals.model_dump() if hasattr(signals, 'model_dump') else signals.dict()
+                active_signals = [k for k, v in sig_dict.items() if v is True and k.startswith('contains_')]
+            except:
+                pass
+
+            session.state["hard_gate"] = {
+                "rag_required": bool(getattr(signals, 'rag_required', False)),
+                "signals": active_signals,
+                "raw": last_msg[:400]
+            }
+            if signals.rag_required:
+                print(f"HARD GATE STATE SET: rag_required=True (Signals: {active_signals})")
+            
+            # Inject State into Instruction (Phase 1.9 Fix)
+            if hasattr(ctx, 'instruction'):
+                state_str = str(session.state["hard_gate"])
+                ctx.instruction += f"\n\n[SYSTEM STATE]: {state_str}"
+
     except Exception as e:
         print(f"Callback error (hard_gate): {e}")
 
@@ -171,52 +208,13 @@ from app.tools_base import (
 )
 
 # --- OBSERVABILITY TRACE ---
-async def log_tool_trace(context, tool_call, tool_output):
-    """Callback to log tool traces for observability and evaluation."""
-    print(f"TRACE: Agent='{context.agent.name}' Tool='{tool_call.function_call.name}' Status=Success Length={len(str(tool_output))}")
-
-# =============================================================================
-# TOOLS
-# =============================================================================
-
-from app.web_search import search_web, search_verified_sources, search_news
+# Imported from app.observability
+# observability trace imported above
+from app.egress import scrub_for_user
+from app.web_search import search_web, search_verified_sources, search_news, search_legal_sources
 from app.pdf_tools import read_pdf_content, get_pdf_metadata
 from app.advanced_tools import process_meeting_transcript, generate_data_chart, schedule_samha_meeting
 from app.image_tools import generate_samha_image
-
-# Mock archive tools for now or import them if they exist
-def save_to_archive(content: str, metadata: dict) -> str: return "Saved to archive."
-def search_archive(query: str) -> str: return "Archive search results."
-def get_archived_content(doc_id: str) -> str: return "Archived content."
-
-# --- TOOL MAPPING ---
-TOOL_MAP = {
-    "retrieve_docs": retrieve_docs,
-    "search_web": search_web,
-    "search_verified_sources": search_verified_sources,
-    "search_news": search_news,
-    "read_pdf_content": read_pdf_content,
-    "get_pdf_metadata": get_pdf_metadata,
-    "process_meeting_transcript": process_meeting_transcript,
-    "generate_data_chart": generate_data_chart,
-    "schedule_samha_meeting": schedule_samha_meeting,
-    "generate_image": generate_samha_image,
-    "image_generation": generate_samha_image, # For compatibility with registry
-    "save_to_archive": save_to_archive,
-    "search_archive": search_archive,
-    "get_archived_content": get_archived_content,
-    "read_excel": read_excel,
-    "read_csv": read_csv,
-    "analyze_excel_summary": analyze_excel_summary,
-}
-
-
-# =============================================================================
-# WEB SEARCH TOOLS
-# =============================================================================
-
-from app.web_search import search_web, search_verified_sources, search_news
-
 
 # =============================================================================
 # DOMAIN EXPERT AGENTS
@@ -225,12 +223,13 @@ from app.web_search import search_web, search_verified_sources, search_news
 # --- TUTKIJA (RESEARCHER) ---
 tutkija_def = get_agent_def("tutkija")
 tutkija_agent = Agent(
-    model=LLM,
+    model=LLM_PRO,
     name=tutkija_def.id,
     description=tutkija_def.description,
     output_key="research_output",
     instruction=f"""
 {ORG_PACK_V1}
+{CRITICAL_REFLECTION_PACK_V1}
 
 ## SINUN ROOLISI: TUTKIJA
 
@@ -292,6 +291,7 @@ sote_agent = Agent(
     tools=get_tools_for_agent("sote"),
     instruction=f"""
 {ORG_PACK_V1}
+{CRITICAL_REFLECTION_PACK_V1}
 
 {SOTE_PACK_V1}
 
@@ -307,7 +307,7 @@ Olet Samhan mielenterveys- ja päihdetyön asiantuntija. Vastaat hyvinvointikysy
 - Kriisitilanteiden tunnistaminen
 
 ### MITEN VASTAAT:
-1. **HAE ENSIN TIETOA** → Käytä `retrieve_docs` työkalua aina ennen vastaamista
+1. **HAE ENSIN TIETOA** -> Käytä `retrieve_docs` työkalua aina ennen vastaamista
 2. Kuuntele empaattisesti
 3. Normalisoi: "Monet kokevat samankaltaista..."
 4. Anna konkreettisia seuraavia askeleita
@@ -338,6 +338,7 @@ yhdenvertaisuus_agent = Agent(
     tools=get_tools_for_agent("yhdenvertaisuus"),
     instruction=f"""
 {ORG_PACK_V1}
+{CRITICAL_REFLECTION_PACK_V1}
 
 {YHDENVERTAISUUS_PACK_V1}
 
@@ -353,7 +354,7 @@ Olet Samhan antirasismi- ja yhdenvertaisuustyön asiantuntija. Autat ymmärtäm�
 - Turvalliset tilat ja kieli
 
 ### MITEN VASTAAT:
-1. **HAE ENSIN TIETOA** → Käytä `retrieve_docs` työkalua aina ennen vastaamista
+1. **HAE ENSIN TIETOA** -> Käytä `retrieve_docs` työkalua aina ennen vastaamista
 2. Kuuntele ja usko kokemusta
 3. Nimeä rakenteet, älä syyllistä yksilöitä
 4. Anna konkreettisia toimintatapoja
@@ -379,6 +380,7 @@ koulutus_agent = Agent(
     tools=get_tools_for_agent("koulutus"),
     instruction=f"""
 {ORG_PACK_V1}
+{CRITICAL_REFLECTION_PACK_V1}
 
 {KOULUTUS_PACK_V1}
 
@@ -463,6 +465,7 @@ kirjoittaja_agent = Agent(
     tools=get_tools_for_agent("kirjoittaja"),
     instruction=f"""
 {ORG_PACK_V1}
+{CRITICAL_REFLECTION_PACK_V1}
 
 {WRITER_PACK_V1}
 
@@ -524,140 +527,7 @@ from app.archive import (
 )
 
 
-def save_to_archive(
-    title: str,
-    summary: str,
-    content: str,
-    document_type: str,
-    program: str = "muu",
-    project: str = "muu",
-    tags: str = "",
-    agent_name: str = "kirjoittaja",
-    prompt_packs: str = "org_pack_v1",
-) -> str:
-    """
-    Tallenna teksti arkistoon. Käytä kun olet tuottanut valmiin tekstin
-    (hakemus, raportti, artikkeli, koulutusrunko, some-postaus).
-    
-    Args:
-        title: Otsikko
-        summary: Tiivistelmä (max 200 merkkiä)
-        content: Koko tekstisisältö
-        document_type: hakemus / raportti / artikkeli / koulutus / some / memo
-        program: stea / erasmus / muu
-        project: koutsi / jalma / icat / paikka_auki / muu
-        tags: Tagit pilkulla eroteltuina, esim. "antirasismi,nuoret,koulutus"
-        agent_name: Tuottanut agentti
-        prompt_packs: Käytetyt packit pilkulla eroteltuina
-    
-    Returns:
-        Arkistokirjauksen ID
-    """
-    archive = get_archive_service()
-    
-    entry = ArchiveEntry(
-        title=title,
-        summary=summary[:500],  # Max 500 chars
-        content=content,
-        document_type=document_type,  # type: ignore
-        program=program,  # type: ignore
-        project=project,  # type: ignore
-        tags=[t.strip() for t in tags.split(",") if t.strip()],
-        agent_name=agent_name,
-        prompt_packs=[p.strip() for p in prompt_packs.split(",") if p.strip()],
-        status="draft",
-    )
-    
-    entry_id = archive.save(entry)
-    print(f"DEBUG: Saved to archive: {entry_id}")
-    
-    return f"Arkistoitu onnistuneesti. ID: {entry_id}"
-
-
-def search_archive(
-    query: str = "",
-    document_type: str = "",
-    program: str = "",
-    project: str = "",
-    tags: str = "",
-    latest_only: bool = True,
-    limit: int = 5,
-) -> str:
-    """
-    Hae arkistosta. Palauttaa löydetyt tekstit.
-    
-    Args:
-        query: Vapaatekstihaku (otsikko, tiivistelmä, tagit)
-        document_type: hakemus / raportti / artikkeli / koulutus / some / memo
-        program: stea / erasmus / muu
-        project: koutsi / jalma / icat / paikka_auki / muu
-        tags: Tagit pilkulla eroteltuina
-        latest_only: True = vain uusin versio per otsikko
-        limit: Tulosten maksimimäärä
-    
-    Returns:
-        Hakutulokset
-    """
-    archive = get_archive_service()
-    
-    search_query = ArchiveSearchQuery(
-        query=query if query else None,
-        document_type=document_type if document_type else None,  # type: ignore
-        program=program if program else None,  # type: ignore
-        project=project if project else None,  # type: ignore
-        tags=[t.strip() for t in tags.split(",") if t.strip()] if tags else None,
-        latest_only=latest_only,
-        limit=limit,
-    )
-    
-    result = archive.search(search_query)
-    
-    if not result.entries:
-        return "Ei tuloksia hakuehdoilla."
-    
-    # Format results
-    output = f"Löytyi {result.total_count} tulosta:\n\n"
-    for entry in result.entries:
-        output += f"**{entry.title}** (ID: {entry.id})\n"
-        output += f"- Tyyppi: {entry.document_type}, Ohjelma: {entry.program}\n"
-        output += f"- Tagit: {', '.join(entry.tags)}\n"
-        output += f"- Tiivistelmä: {entry.summary[:100]}...\n"
-        output += f"- Luotu: {entry.created_at.strftime('%Y-%m-%d')}\n\n"
-    
-    return output
-
-
-def get_archived_content(entry_id: str) -> str:
-    """
-    Hae arkistoitu teksti ID:llä. Palauttaa koko sisällön.
-    
-    Args:
-        entry_id: Arkistokirjauksen ID (esim. art_20241217_abc123)
-    
-    Returns:
-        Arkistoitu sisältö
-    """
-    archive = get_archive_service()
-    entry = archive.get(entry_id)
-    
-    if not entry:
-        return f"Arkistokirjausta ID:llä {entry_id} ei löytynyt."
-    
-    output = f"# {entry.title}\n\n"
-    output += f"**ID:** {entry.id}\n"
-    output += f"**Tyyppi:** {entry.document_type}\n"
-    output += f"**Ohjelma:** {entry.program}\n"
-    output += f"**Hanke:** {entry.project}\n"
-    output += f"**Tagit:** {', '.join(entry.tags)}\n"
-    output += f"**Agentti:** {entry.agent_name}\n"
-    output += f"**Prompt packs:** {', '.join(entry.prompt_packs)}\n"
-    output += f"**Luotu:** {entry.created_at.strftime('%Y-%m-%d %H:%M')}\n"
-    output += f"**Versio:** {entry.version}\n\n"
-    output += "---\n\n"
-    output += entry.content
-    
-    return output
-
+from app.archive_tools import save_to_archive, search_archive, get_archived_content
 
 # Arkistoagentti
 arkisto_def = get_agent_def("arkisto")
@@ -670,6 +540,7 @@ arkisto_agent = Agent(
     before_tool_callback=enforce_tool_matrix,
     instruction=f"""
 {ORG_PACK_V1}
+{CRITICAL_REFLECTION_PACK_V1}
 
 ## SINUN ROOLISI: ARKISTOASIANTUNTIJA
 
@@ -701,13 +572,13 @@ Arkistoi AINA kun:
 ### ESIMERKIT
 
 **Käyttäjä:** "Tallenna tämä Stea-hakemus"
-→ save_to_archive(title="...", document_type="hakemus", program="stea", ...)
+-> save_to_archive(title="...", document_type="hakemus", program="stea", ...)
 
 **Käyttäjä:** "Etsi viimeisin antirasismikoulutuksen runko"
-→ search_archive(document_type="koulutus", tags="antirasismi", latest_only=True)
+-> search_archive(document_type="koulutus", tags="antirasismi", latest_only=True)
 
 **Käyttäjä:** "Näytä arkistoidun dokumentin sisältö"
-→ get_archived_content(entry_id="art_20241217_abc123")
+-> get_archived_content(entry_id="art_20241217_abc123")
 """,
 )
 
@@ -775,99 +646,41 @@ ERASMUS_EVALUATION_PROMPT = """
 
 
 # --- RAPORTTI ARVIOIJA ---
-raportti_arvioija_def = get_agent_def("raportti_arvioija")
-raportti_arvioija_agent = Agent(
-    model=LLM,
-    name=raportti_arvioija_def.id,
-    description=raportti_arvioija_def.description,
+proposal_reviewer_def = get_agent_def("proposal_reviewer")
+proposal_reviewer_agent = Agent(
+    model=LLM_PRO,
+    name=proposal_reviewer_def.id,
+    description=proposal_reviewer_def.description,
     output_key="evaluation_response",
-    tools=get_tools_for_agent("raportti_arvioija"),
-    generate_content_config=LONG_OUTPUT_CONFIG,
+    tools=get_tools_for_agent("proposal_reviewer"),
+    generate_content_config=CRITIC_CONFIG,
     instruction=f"""
-{ORG_PACK_V1}
+{RADICAL_AUDITOR_PACK_V1}
+{QA_PORT_PACK_V1}
+{GOLD_FAILURE_PACK_V1}
+{FUNDING_TYPES_PACK_V1}
 
-## SINUN ROOLISI: RAPORTTI-ARVIOIJA
+## SINUN ROOLISI: THE ENFORCER (RADICAL AUDITOR)
 
-Olet Samhan raporttien laadunvarmistuksen asiantuntija. Arvioit STEA- ja Erasmus+ -raportteja **kriittisesti, kattavasti ja rehellisesti**.
+Olet laadunvarmistaja, jonka tehtävänä on suojella julkisia varoja epämääräisiltä tai sektorin ulkopuolisilta hankkeilta.
 
-### KRIITTINEN PERIAATE: OLE REHELLINEN
+### ARVIOINTI-MODUS:
+1. **Aloita DESTRUCTION PHASE**: Listaa ensin 3 kriittistä syytä, miksi tämä hanke on tällä hetkellä epäonnistuminen.
+2. **Käytä 0-100 asteikkoa**: Muista, että 61 on vasta alhaisin mahdollinen läpäisypiste.
+3. **Sektoripoliisi**: Tarkista rahoitusinstrumentin mukaisuus (FUNDING_TYPES_PACK_V1).
 
-- ÄLÄ OLE KOHTELIAS TOTUUDEN KUSTANNUKSELLA
-- Kerro suoraan mikä on heikkoa, puutteellista tai epäselvää
-- Anna konkreettisia korjausehdotuksia jokaiseen ongelmaan
-- Tunnusta myös hyvät puolet, mutta älä liioittele
-
----
-
-### ARVIOINTIPROSESSI
-
-1. **HAE ENSIN KRITEERIT** → Käytä `retrieve_docs` hakeaksesi viralliset arviointikriteerit
-2. **Tunnista raporttityyppi**: STEA vai Erasmus+?
-3. **Arvioi järjestelmällisesti** jokainen kriteeri erikseen
-4. **Anna pisteet** (1-5) jokaiselle osa-alueelle
-5. **Yhteenveto**: Kokonaisarvio, vahvuudet, heikkoudet, ehdotukset
-
----
-
-### STEA-RAPORTIN ARVIOINTI
-
-{STEA_EVALUATION_PROMPT}
-
----
-
-### ERASMUS+ RAPORTIN ARVIOINTI
-
-{ERASMUS_EVALUATION_PROMPT}
-
----
-
-### VASTAUKSEN MUOTO
-
+### OUTPUT FORMAT
 ```markdown
-# Raportin arviointi: [Raportin nimi]
+# Hakemusarviointi: RADICAL AUDIT REPORT
 
-## Yleiskuva
-- **Tyyppi:** STEA / Erasmus+
-- **Hanke:** [Hankkeen nimi]
-- **Kokonaisarvio:** X/5 ⭐
-
-## Kriteerikohtainen arviointi
-
-### 1. [Kriteeri] - X/5
-**Vahvuudet:**
+## Destructive Analysis (Red Team)
 - ...
 
-**Heikkoudet:**
+## Kokonaispisteet: XX / 100 
+
+## ROADMAP TO 81+ (Actionable Remediation)
 - ...
-
-**Konkreettinen parannusehdotus:**
-- ...
-
-[Toista jokaiselle kriteerille]
-
-## Yhteenveto
-
-### ✅ Raportin vahvuudet
-1. ...
-
-### ❌ Kriittiset puutteet
-1. ...
-
-### 🔧 Välittömät korjausehdotukset
-1. ...
-
-### 📊 Kokonaisarvio
-[Rehellinen, suora yhteenveto]
 ```
-
----
-
-### KRIITTISET SÄÄNNÖT
-
-- **ÄLÄ HYVÄKSY EPÄMÄÄRÄISYYTTÄ**: "Toiminta sujui hyvin" → Kysy: Montako osallistujaa? Mitä palautetta?
-- **VAADI LUKUJA**: Jos puuttuu tilastoja, mainitse se kritiikkinä
-- **ARVIOI SUHTEESSA TAVOITTEISIIN**: Vertaa tuloksia alkuperäiseen hakemukseen
-- **OLE REILU MUTTA VAATIVA**: Tunnista aidot onnistumiset, mutta älä ohita puutteita
 """,
 )
 
@@ -879,22 +692,31 @@ Olet Samhan raporttien laadunvarmistuksen asiantuntija. Arvioit STEA- ja Erasmus
 # Reset parents for re-initialization (fixes Pydantic errors in eval/hot-reload)
 for a in [
     tutkija_agent, sote_agent, yhdenvertaisuus_agent, koulutus_agent,
-    kirjoittaja_agent, arkisto_agent, raportti_arvioija_agent, syvahaku_agent,
+    kirjoittaja_agent, arkisto_agent, proposal_reviewer_agent, syvahaku_agent,
     hankesuunnittelija_agent, hallinto_agent, hr_agent, talous_agent,
     viestinta_agent, lomake_agent, vapaaehtoiset_agent, laki_agent, kumppanit_agent
 ]:
     a._parent = None
 
 koordinaattori_agent = Agent(
-    model=LLM,
+    model=LLM_PRO,
     name="koordinaattori",
     description="Samhan pääkoordinaattori. Ymmärtää käyttäjän tarpeen ja ohjaa oikealle asiantuntijalle tai käynnistää monivaiheisen workflown.",
+    output_key="draft_response",
     instruction=f"""
 {ORG_PACK_V1}
+{CRITICAL_REFLECTION_PACK_V1}
 
 ## SINUN ROOLISI: PÄÄKOORDINAATTORI
 
 Olet Samha-botin pääkoordinaattori. Tehtäväsi on ymmärtää käyttäjän tarve, valita oikea asiantuntijakategoria ja **varmistaa aina laadunvarmistus**.
+
+### TIEDOKSI: TILAKONE (HARD GATES)
+# State injected below: [SYSTEM STATE]: {{...}}
+
+Tarkista yllä olevasta tilasta `rag_required`:
+- Jos `rag_required` == True -> **SINUN ON pakko delegoida ensin `tutkija`-agentille**.
+- ÄLÄ KOSKAAN vastata itse luvuilla tai faktoilla jos `rag_required` on päällä.
 
 ---
 
@@ -913,7 +735,7 @@ Olet Samha-botin pääkoordinaattori. Tehtäväsi on ymmärtää käyttäjän ta
 - `laki_gdpr`: Juridiikka, tietosuoja.
 - `vapaaehtoiset`: Vapaaehtoishallinta.
 - `lomakkeet`: Hakemuslomakkeet (STEA/Erasmus).
-- `kumppanit_kulttuuri`: Sidosryhmät, kulttuurinen sensitiivisyys.
+- `kumppanit`: Sidosryhmät, kulttuurinen sensitiivisyys.
 
 ### 3. RESEARCH (Tutkimus)
 - `tutkija`: Faktat, uutiset, Samha-tieto, Web-haku.
@@ -923,7 +745,7 @@ Olet Samha-botin pääkoordinaattori. Tehtäväsi on ymmärtää käyttäjän ta
 - `kirjoittaja`: Pitkät artikkelit, raportit.
 - `grant_writer`: Rahoitushakemukset (STEA/EU).
 - `arkisto`: Tallennus ja haku.
-- `raportti_arvioija`: Raporttien kriittinen arviointi.
+- `proposal_reviewer`: Raporttien kriittinen arviointi.
 
 ---
 
@@ -958,32 +780,43 @@ Jos pyyntö sisältää:
 ---
 
 ## KRIISITILANTEET (EHDOTON)
-- Akuutti hätä → 112.
-- Kriisipuhelin → 09 2525 0111.
+- Akuutti hätä -> 112.
+- Kriisipuhelin -> 09 2525 0111.
 - Vastaa itse empaattisesti, älä delegoi kriisiä.
 """,
-    tools=[schedule_samha_meeting],
+    tools=get_tools_for_agent("koordinaattori"),
+    sub_agents=[
+        tutkija_agent, sote_agent, yhdenvertaisuus_agent, koulutus_agent,
+        kirjoittaja_agent, arkisto_agent, proposal_reviewer_agent, syvahaku_agent,
+        hankesuunnittelija_agent, hallinto_agent, hr_agent, talous_agent,
+        viestinta_agent, lomake_agent, vapaaehtoiset_agent, laki_agent, kumppanit_agent,
+        qa_policy_agent
+    ]
 )
 
 # --- ATTACH ENFORCEMENT TO ALL AGENTS ---
-for a in [
+ALL_AGENTS = [
     tutkija_agent, sote_agent, yhdenvertaisuus_agent, koulutus_agent,
-    kirjoittaja_agent, arkisto_agent, raportti_arvioija_agent, syvahaku_agent,
+    kirjoittaja_agent, arkisto_agent, proposal_reviewer_agent, syvahaku_agent,
     hankesuunnittelija_agent, hallinto_agent, hr_agent, talous_agent,
-    viestinta_agent, lomake_agent, vapaaehtoiset_agent, laki_agent, kumppanit_agent
-]:
-    a.before_tool_callback = enforce_tool_matrix
-    a.after_tool_callback = log_tool_trace
+    viestinta_agent, lomake_agent, vapaaehtoiset_agent, laki_agent, kumppanit_agent,
+    koordinaattori_agent, qa_policy_agent
+]
+
+for a in ALL_AGENTS:
+    if a:
+        a.before_tool_callback = enforce_tool_matrix
+        a.after_tool_callback = log_tool_trace
 
 # Koordinaattori specific callbacks
-koordinaattori_agent.before_model_callback = hard_gate_callback
-koordinaattori_agent.before_tool_callback = enforce_tool_matrix
+if koordinaattori_agent:
+    koordinaattori_agent.before_model_callback = hard_gate_callback
 
 # --- ROOT PIPELINE (FORCED QA GATE) ---
 from google.adk.agents import SequentialAgent
 
 # The coordinator produces a 'draft_response'
-koordinaattori_agent.output_key = "draft_response"
+# koordinaattori_agent.output_key = "draft_response" # Set in constructor
 
 # The QA agent specifically reviews 'draft_response'
 qa_policy_agent.instruction += "\n\nTARKISTA TÄMÄ TEKSTI (draft_response): {draft_response}"
@@ -998,12 +831,15 @@ async def qa_numeric_enforcement_callback(context=None, **kwargs):
     try:
         state = getattr(ctx, 'session', None).state if hasattr(ctx, 'session') else {}
         draft = state.get("draft_response", "")
-        # In a real ADK setup, we'd need to extract 'facts' and 'tool_calls' from the context/session
-        # For now, we simulate the payload for the check
+        
+        # Read Tool Traces from State (Phase 1.9)
+        traces = state.get("tool_traces", [])
+        tool_names = [t.get("tool") for t in traces if isinstance(t, dict)]
+        
         payload = {
             "detailed_content": draft,
             "facts": state.get("facts", []),
-            "metadata": {"tool_calls": state.get("tool_calls", [])}
+            "metadata": {"tool_calls": tool_names}
         }
         
         check_result = finance_numeric_integrity_check(payload)
@@ -1015,12 +851,50 @@ async def qa_numeric_enforcement_callback(context=None, **kwargs):
     except Exception as e:
         print(f"Callback error (qa_numeric): {e}")
 
-qa_policy_agent.before_model_callback = qa_numeric_enforcement_callback
+async def egress_scrub_callback(context=None, **kwargs):
+    """Ensure final output is scrubbed."""
+    ctx = context or kwargs.get('callback_context')
+    try:
+        session = getattr(ctx, "session", None)
+        if session and hasattr(session, "state"):
+            final = session.state.get("final_response", "")
+            if final:
+                scrubbed = scrub_for_user(final)
+                session.state["final_response"] = scrubbed
+    except Exception as e:
+        print(f"Egress Scrub Error: {e}")
+
+
+# --- CALLBACK ATTACHMENT ---
+ALL_AGENTS = [
+    koordinaattori_agent, tutkija_agent, sote_agent, yhdenvertaisuus_agent, koulutus_agent,
+    kirjoittaja_agent, arkisto_agent, proposal_reviewer_agent, syvahaku_agent,
+    hankesuunnittelija_agent, hallinto_agent, hr_agent, talous_agent,
+    viestinta_agent, lomake_agent, vapaaehtoiset_agent, laki_agent, kumppanit_agent,
+    qa_policy_agent
+]
+
+for a in ALL_AGENTS:
+    if a:
+        a.before_tool_callback = enforce_tool_matrix
+        a.after_tool_callback = log_tool_trace
+
+from app.middleware import chain_callbacks, pii_sanitize_middleware
+
+# Chain the middleware: 1. Scrub PII (Ingress/Draft), 2. Check Numeric Integrity
+if qa_policy_agent:
+    qa_policy_agent.before_model_callback = chain_callbacks(
+        pii_sanitize_middleware, 
+        qa_numeric_enforcement_callback
+    )
+
+    # Egress Scrub on Final Response
+    qa_policy_agent.after_model_callback = egress_scrub_callback
 
 samha_pipeline = SequentialAgent(
     name="samha_pipeline",
-    sub_agents=[koordinaattori_agent, qa_policy_agent],
-    description="Samha Multi-Agent Pipeline with Mandatory QA Gate."
+    sub_agents=[koordinaattori_agent],
+    description="Samha Multi-Agent Pipeline with Internal QA Delegation."
 )
 
 

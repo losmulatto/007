@@ -57,6 +57,11 @@ make install && make playground
 
 For full command options and usage, refer to the [Makefile](Makefile).
 
+### Verification
+- **Run Full Regression Suite**: `uv run python eval_comprehensive.py --suite full_eval_25.json`
+- **Run Extended Suite**: `uv run python eval_comprehensive.py --suite full_suite_80.json` (Coming soon)
+- **Run Unit Tests**: `uv run pytest -q tests/`
+
 
 ## Usage
 

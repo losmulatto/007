@@ -67,6 +67,7 @@ qa_policy_agent = Agent(
     name=QA_DEF.id,
     description=QA_DEF.description,
     instruction=QA_POLICY_INSTRUCTION,
+    output_key="final_response",
     generate_content_config=genai_types.GenerateContentConfig(
         temperature=0.0,  # Deterministic for QA
     ),

@@ -51,7 +51,7 @@ KUMPPANI_OHJEET = """
 """
 
 # --- SIDOSRYHMÄ- & KULTTUURI-ASIANTUNTIJA ---
-kumppanit_def = get_agent_def("kumppanit_kulttuuri")
+kumppanit_def = get_agent_def("kumppanit")
 kumppanit_agent = Agent(
     model=LLM,
     name=kumppanit_def.id,

@@ -120,6 +120,15 @@ VERIFIED_DOMAINS = [
     "otlas.eu",             # OTLAS partnerhaku
 ]
 
+LEGAL_DOMAINS = [
+    "finlex.fi",
+    "tietosuoja.fi",
+    "eduskunta.fi",
+    "stm.fi",
+    "kkv.fi", # Kilpailu- ja kuluttajavirasto
+    "avi.fi", # Aluehallintovirasto
+]
+
 # News sources for general search (Finnish media)
 NEWS_DOMAINS = [
     "yle.fi",               # Yle - luotettavin
@@ -596,6 +605,20 @@ def search_news(query: str, time_range: str = "m1", max_results: int = 10) -> st
         Uutiset ja ajankohtaiset
     """
     return search_web(query, mode="news", max_results=max_results, time_range=time_range)
+
+
+def search_legal_sources(query: str, max_results: int = 5) -> str:
+    """
+    Hae VAIN juridisista lähteistä (Finlex, Tietosuoja, Ministeriöt).
+    
+    Args:
+        query: Hakusana (esim. 'tietosuoja-asetus henkilötiedot')
+        max_results: Tulosten määrä
+    """
+    # Construct a site-restricted query manually to bypass mode logic
+    site_query = " OR ".join([f"site:{d}" for d in LEGAL_DOMAINS])
+    full_query = f"{query} ({site_query})"
+    return search_web(full_query, mode="general", max_results=max_results)
 
 
 # =============================================================================

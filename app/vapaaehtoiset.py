@@ -76,7 +76,7 @@ vapaaehtoiset_agent = Agent(
     name=vapaaehtoiset_def.id,
     description=vapaaehtoiset_def.description,
     output_key="vapaaehtoiset_response",
-    tools=[retrieve_docs, schedule_samha_meeting],  # As per registry
+    tools=[retrieve_docs],  # As per registry (Calendar moved to Coordinator)
     instruction=f"""
 {ORG_PACK_V1}
 

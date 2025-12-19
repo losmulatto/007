@@ -29,8 +29,8 @@ from pydantic import BaseModel, Field
 # =============================================================================
 
 # Model settings - will be overridden by agent.py imports
-WORKER_MODEL = "gemini-2.5-flash"
-CRITIC_MODEL = "gemini-2.5-pro"
+WORKER_MODEL = "gemini-3-flash-preview"
+CRITIC_MODEL = "gemini-3-pro-preview"
 MAX_SEARCH_ITERATIONS = 3
 
 

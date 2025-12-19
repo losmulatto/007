@@ -10,13 +10,14 @@ Used by:
 
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
+from app.tool_ids import ToolId
 
 class AgentMetadata(BaseModel):
     id: str
     display_name: str
     category: str  # leadership, domain_expert, research, output, qa_policy
     description: str
-    allowed_tools: List[str]
+    allowed_tools: List[ToolId]
     prompt_pack_versions: List[str]
     is_enabled: bool = True
     icon: Optional[str] = None
@@ -29,13 +30,23 @@ OUTPUT = "output"
 QA_POLICY = "qa_policy"
 
 # Tool Groups (Least-Privilege)
-BASIC_TOOLS = ["retrieve_docs"]
-RESEARCH_TOOLS = ["retrieve_docs", "search_web_verified", "search_news", "read_pdf_content", "get_pdf_metadata"]
-ADMIN_TOOLS = ["retrieve_docs", "read_pdf_content", "process_meeting_transcript"]
-FINANCE_TOOLS = ["retrieve_docs", "read_excel", "read_csv", "analyze_excel_summary", "generate_data_chart"]
-CREATIVE_TOOLS = ["retrieve_docs", "image_generation"]
-ARCHIVE_TOOLS = ["save_to_archive", "search_archive", "get_archived_content"]
-CALENDAR_TOOLS = ["schedule_samha_meeting"]
+BASIC_TOOLS = [ToolId.RETRIEVE_DOCS]
+RESEARCH_TOOLS = [
+    ToolId.RETRIEVE_DOCS, ToolId.SEARCH_WEB, ToolId.SEARCH_VERIFIED, ToolId.SEARCH_NEWS,
+    ToolId.READ_PDF, ToolId.GET_PDF_META
+]
+ADMIN_TOOLS = [ToolId.RETRIEVE_DOCS, ToolId.READ_PDF, ToolId.PROCESS_MEETING]
+FINANCE_TOOLS = [
+    ToolId.RETRIEVE_DOCS, ToolId.READ_EXCEL, ToolId.READ_CSV,
+    ToolId.ANALYZE_EXCEL, ToolId.GENERATE_CHART
+]
+CREATIVE_TOOLS = [
+    ToolId.RETRIEVE_DOCS, ToolId.GENERATE_IMAGE, 
+    ToolId.TRANSLATE, ToolId.FORMAT_SOCIAL, ToolId.CREATE_NEWSLETTER
+]
+ARCHIVE_TOOLS = [ToolId.SAVE_ARCHIVE, ToolId.SEARCH_ARCHIVE, ToolId.GET_ARCHIVED]
+CALENDAR_TOOLS = [ToolId.SCHEDULE_MEETING]
+LEGAL_TOOLS = [ToolId.RETRIEVE_DOCS, ToolId.SEARCH_LEGAL]
 
 SAMHA_AGENT_REGISTRY: Dict[str, AgentMetadata] = {
     # LEADERSHIP
@@ -44,7 +55,7 @@ SAMHA_AGENT_REGISTRY: Dict[str, AgentMetadata] = {
         display_name="Koordinaattori",
         category=LEADERSHIP,
         description="Samhan palvelukeskuksen aivot. Reitittää ja orkestroi muita asiantuntijoita.",
-        allowed_tools=["transfer_to_agent"],
+        allowed_tools=[ToolId.TRANSFER] + CALENDAR_TOOLS,
         prompt_pack_versions=["org_pack_v1"],
     ),
 
@@ -102,7 +113,7 @@ SAMHA_AGENT_REGISTRY: Dict[str, AgentMetadata] = {
         display_name="Laki & GDPR",
         category=DOMAIN_EXPERT,
         description="Juridinen ja tietosuoja-asiantuntija.",
-        allowed_tools=RESEARCH_TOOLS,
+        allowed_tools=LEGAL_TOOLS,
         prompt_pack_versions=["org_pack_v1"],
     ),
     "vapaaehtoiset": AgentMetadata(
@@ -110,7 +121,7 @@ SAMHA_AGENT_REGISTRY: Dict[str, AgentMetadata] = {
         display_name="Vapaaehtoishallinta",
         category=DOMAIN_EXPERT,
         description="Vapaaehtoisten koordinointi ja tuki.",
-        allowed_tools=BASIC_TOOLS + CALENDAR_TOOLS,
+        allowed_tools=BASIC_TOOLS,
         prompt_pack_versions=["org_pack_v1"],
     ),
     "lomakkeet": AgentMetadata(
@@ -118,11 +129,11 @@ SAMHA_AGENT_REGISTRY: Dict[str, AgentMetadata] = {
         display_name="Lomake-asiantuntija",
         category=DOMAIN_EXPERT,
         description="STEA- ja Erasmus-lomakkeiden täyttö ja ohjeistus.",
-        allowed_tools=BASIC_TOOLS + ["read_pdf_content"],
+        allowed_tools=BASIC_TOOLS + [ToolId.READ_PDF],
         prompt_pack_versions=["org_pack_v1"],
     ),
-    "kumppanit_kulttuuri": AgentMetadata(
-        id="kumppanit_kulttuuri",
+    "kumppanit": AgentMetadata(
+        id="kumppanit",
         display_name="Sidosryhmä & Kulttuuri",
         category=DOMAIN_EXPERT,
         description="Kumppanuudet ja kulttuurinen osaaminen.",
@@ -173,12 +184,12 @@ SAMHA_AGENT_REGISTRY: Dict[str, AgentMetadata] = {
         allowed_tools=ARCHIVE_TOOLS,
         prompt_pack_versions=["org_pack_v1"],
     ),
-    "raportti_arvioija": AgentMetadata(
-        id="raportti_arvioija",
-        display_name="Raportti-arvioija",
+    "proposal_reviewer": AgentMetadata(
+        id="proposal_reviewer",
+        display_name="Raportti-arvioija (QA)",
         category=OUTPUT,
-        description="Arvioi raportteja ja hakemuksia kriittisesti.",
-        allowed_tools=BASIC_TOOLS,
+        description="Arvioi raportteja ja hakemuksia kriittisesti hyödyntäen virallisia oppaita.",
+        allowed_tools=RESEARCH_TOOLS,
         prompt_pack_versions=["org_pack_v1"],
     ),
 
@@ -192,6 +203,9 @@ SAMHA_AGENT_REGISTRY: Dict[str, AgentMetadata] = {
         prompt_pack_versions=["org_pack_v1"],
     ),
 }
+
+# Aliases for backward compatibility
+SAMHA_AGENT_REGISTRY["raportti_arvioija"] = SAMHA_AGENT_REGISTRY["proposal_reviewer"]
 
 def get_agent_def(agent_id: str) -> AgentMetadata:
     if agent_id not in SAMHA_AGENT_REGISTRY:

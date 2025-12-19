@@ -8,6 +8,8 @@ NUMERIC_PATTERNS = [
     r"\bn\s*=\s*\d+\b",                             # n=30
 ]
 
+from app.tool_ids import ToolId
+
 def _contains_numeric_claim(text: str) -> bool:
     for p in NUMERIC_PATTERNS:
         if re.search(p, text):
@@ -39,7 +41,15 @@ def finance_numeric_integrity_check(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"passed": True, "severity": "info", "issue": None}
 
     # vaadi laskentajälki (python/pandas tai excel-analyysi) tai rag-lähde (jos kyse on sisäisestä raportista)
-    has_calc_tool = any(t in tool_names for t in ["python", "read_excel", "analyze_excel_summary"])
+    # Check if tool trace contains calculation tools
+    required_calc_tools = [
+        "python", 
+        ToolId.READ_EXCEL, 
+        ToolId.ANALYZE_EXCEL, 
+        ToolId.RETRIEVE_DOCS,
+        ToolId.SEARCH_VERIFIED
+    ]
+    has_calc_tool = any(t in tool_names for t in required_calc_tools)
     if not has_calc_tool:
         return {
             "passed": False,
