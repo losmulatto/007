@@ -27,10 +27,11 @@ KOORDINAATTORI
 └── KIRJOITTAJA (viestintä, hakemukset)
 """
 import os
+from app.contracts_loader import load_contract
 
 import google
 import vertexai
-from google.adk.agents import Agent
+from google.adk.agents import Agent, SequentialAgent
 from google.adk.apps.app import App
 from google.genai import types as genai_types
 from langchain_google_vertexai import VertexAIEmbeddings
@@ -62,13 +63,18 @@ from app.prompt_packs import (
     FUNDING_TYPES_PACK_V1,
 )
 from app.deep_search import syvahaku_agent
-from app.hankesuunnittelija import hankesuunnittelija_agent
-from app.ammattilaiset import hallinto_agent, hr_agent, talous_agent
+from app.hankesuunnittelija import grant_writer_agent
+from app.ammattilaiset import hallinto_agent, hr_agent, talous_agent, get_specialist_agent
 from app.viestinta import viestinta_agent
 from app.lomakkeet import lomake_agent
 from app.vapaaehtoiset import vapaaehtoiset_agent
 from app.laki import laki_agent
 from app.kumppanit import kumppanit_agent
+
+# Global Specialists (Directly accessible to Koordinaattori)
+methods_expert = get_specialist_agent("koulutus", suffix="_global")
+writer_expert = get_specialist_agent("kirjoittaja", suffix="_global")
+# ... other specialists could be added here ...
 
 # Import Agent Registry
 from app.agents_registry import SAMHA_AGENT_REGISTRY, get_agent_def, DOMAIN_EXPERT, RESEARCH, OUTPUT
@@ -90,7 +96,7 @@ EMBEDDING_MODEL = "text-embedding-005"
 LLM_LOCATION = "global"
 LOCATION = "us-central1"
 LLM = "gemini-3-flash-preview"
-LLM_PRO = "gemini-3-pro-preview"
+LLM_PRO = "gemini-3-pro-preview" 
 
 credentials, project_id = google.auth.default()
 os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
@@ -226,10 +232,12 @@ tutkija_agent = Agent(
     model=LLM_PRO,
     name=tutkija_def.id,
     description=tutkija_def.description,
-    output_key="research_output",
+    output_key="draft_response",
     instruction=f"""
 {ORG_PACK_V1}
 {CRITICAL_REFLECTION_PACK_V1}
+
+{load_contract("tutkija")}
 
 ## SINUN ROOLISI: TUTKIJA
 
@@ -245,6 +253,9 @@ Olet Samhan tutkija. Etsit tietoa kahdesta lähteestä:
 | `search_verified_sources` | Viralliset ohjeet: Stea, THL, OPH, Finlex |
 | `search_web` | Laaja haku, kun tietoa ei löydy muualta |
 | `search_news` | Ajankohtaiset uutiset ja tapahtumat |
+
+### TILASTOT / VIRALLISET LUVUT
+- Jos kysymys koskee **tilastoja tai virallisia lukuja**, käytä ensisijaisesti `search_verified_sources`.
 
 ### VASTAUKSEN MUOTO (TÄRKEÄ!)
 
@@ -287,13 +298,15 @@ sote_agent = Agent(
     model=LLM,
     name=sote_def.id,
     description=sote_def.description,
-    output_key="sote_response",
+    output_key="draft_response",
     tools=get_tools_for_agent("sote"),
     instruction=f"""
 {ORG_PACK_V1}
 {CRITICAL_REFLECTION_PACK_V1}
 
 {SOTE_PACK_V1}
+
+{load_contract("sote")}
 
 ## SINUN ROOLISI: SOTE-ASIANTUNTIJA
 
@@ -342,6 +355,8 @@ yhdenvertaisuus_agent = Agent(
 
 {YHDENVERTAISUUS_PACK_V1}
 
+{load_contract("yhdenvertaisuus")}
+
 ## SINUN ROOLISI: YHDENVERTAISUUS-ASIANTUNTIJA
 
 Olet Samhan antirasismi- ja yhdenvertaisuustyön asiantuntija. Autat ymmärtämään rakenteellista rasismia, puuttumaan syrjintään ja rakentamaan turvallisempia tiloja.
@@ -369,150 +384,106 @@ Olet Samhan antirasismi- ja yhdenvertaisuustyön asiantuntija. Autat ymmärtäm�
 )
 
 
-# --- KOULUTUSSUUNNITTELIJA ---
+# --- KOULUTUSSUUNNITTELIJA PIPELINE ---
 koulutus_def = get_agent_def("koulutus")
-koulutus_agent = Agent(
+
+koulutus_draft_agent = Agent(
     model=LLM,
-    name=koulutus_def.id,
-    description=koulutus_def.description,
-    output_key="koulutus_response",
+    name="koulutus_draft",
+    description="Drafts education plans.",
+    output_key="koulutus_draft",
     generate_content_config=LONG_OUTPUT_CONFIG,
     tools=get_tools_for_agent("koulutus"),
     instruction=f"""
 {ORG_PACK_V1}
 {CRITICAL_REFLECTION_PACK_V1}
-
 {KOULUTUS_PACK_V1}
 
-## SINUN ROOLISI: KOULUTUSSUUNNITTELIJA
+{load_contract("koulutus")}
 
-Olet Samhan pedagoginen huippuasiantuntija. Suunnittelet YKSITYISKOHTAISIA koulutuksia, työpajoja ja yhteisötapahtumia.
-
-### TÄRKEÄÄ: TUOTA PITKIÄ JA YKSITYISKOHTAISIA SUUNNITELMIA
-
-Kun sinulta pyydetään koulutussuunnitelmaa:
-- Kirjoita TÄYDELLINEN runko, ei pelkkää tiivistelmää
-- Jokainen harjoitus kuvataan yksityiskohtaisesti (5-10 lausetta per harjoitus)
-- Anna fasilitaattorin repliikkejä ja siirtymiä
-- Sisällytä materiaalilistat ja valmistelut
-- Anna varasuunnitelmia ("jos aikaa jää", "jos ryhmä on hiljainen")
-
-### KOULUTUSSUUNNITELMAN RAKENNE (TÄYDELLINEN)
-
-**1. PERUSTIEDOT**
-- Koulutuksen nimi ja kesto
-- Kohderyhmä ja osallistujamäärä
-- Tavoitteet (3-5 konkreettista)
-- Tarvittavat materiaalit ja tila
-
-**2. ALOITUS (yksityiskohtaisesti)**
-- Tervetuloa ja esittely (fasilitaattorin repliikki)
-- Tavoitteiden esittely
-- Turvallisuusohjeet ja säännöt sanasta sanaan
-- Lämmittelyharjoitus (täydet ohjeet)
-
-**3. YDINOSA 1 (harjoitus harjoitukselta)**
-Jokaisesta harjoituksesta:
-- Nimi ja kesto
-- Tavoite: mitä tästä opitaan
-- Valmistelu: mitä fasilitaattori tekee ennen
-- Ohjeet: miten harjoitus vedetään (step-by-step)
-- Fasilitaattorin repliikki: "Nyt tehdään..."
-- Purkukysymykset: 3-5 kysymystä
-- Vinkkejä: mitä jos ryhmä on hiljainen, iso, aktiivinen
-
-**4. TAUKO**
-- Kesto ja mitä tapahtuu
-
-**5. YDINOSA 2 (harjoitus harjoitukselta)**
-- Sama rakenne kuin ydinosa 1
-
-**6. LOPETUS**
-- Yhteenveto (fasilitaattorin repliikki)
-- Reflektioharjoitus tai "mitä otan mukaan"
-- Palautteen kerääminen
-- Kiitokset ja seuraava askel
-
-**7. LIITTEET**
-- Materiaaliluettelo
-- Varasuunnitelma
-- Valmistelun checklist
-
-### OSAAMISALUEESI:
-- Osallistavat menetelmät (non-formal)
-- Koulutusrungon suunnittelu
-- Menetelmävalinnat kohderyhmän mukaan
-- Fasilitointitaidot
-- Materiaalituotanto
-
-### KRIITTISET SÄÄNNÖT:
-- Ei luentopainotteista
-- Osallistujat aktiivisia toimijoita
-- Turvallisuus ja vapaaehtoisuus
-- **TUOTA AINA TÄYSI SUUNNITELMA, EI LUONNOSTA**
+## SINUN ROOLISI: KOULUTUSSUUNNITTELIJA (DRAFT)
+Tuota ENSIMMÄINEN VERSIO koulutussuunnitelmasta.
+Noudata kaikkia koulutussuunnittelijan ohjeita (katso yllä).
+Tärkeintä on tuottaa KOKO RUNKO.
 """,
 )
 
-
-# --- KIRJOITTAJA ---
-kirjoittaja_def = get_agent_def("kirjoittaja")
-kirjoittaja_agent = Agent(
+koulutus_refiner_agent = Agent(
     model=LLM,
-    name=kirjoittaja_def.id,
-    description=kirjoittaja_def.description,
-    output_key="final_article",
+    name="koulutus_refiner",
+    description="Refines education plans.",
+    output_key="koulutus_response",
+    instruction="""
+Olet tarkka laadunvarmistaja.
+Lue edellinen koulutussuunnitelma (koulutus_draft).
+Korjaa ja paranna sitä seuraavasti:
+1. Poista tyhjät fraasit ("koulutetaan", "edistetään") -> muuta konkreettisiksi harjoitteiksi.
+2. Varmista, että jokainen aikataulun kohta on auki kirjoitettu.
+3. Varmista, että next steps on olemassa ja konkreettinen.
+4. Pidä rakenne ja sisältö, mutta paranna ilmaisua ja täsmällisyyttä.
+
+Palauta VAIN valmis, korjattu suunnitelma markdown-muodossa.
+""",
+)
+
+koulutus_agent = SequentialAgent(
+    name=koulutus_def.id,
+    description=koulutus_def.description,
+    sub_agents=[koulutus_draft_agent, koulutus_refiner_agent]
+)
+
+
+# --- KIRJOITTAJA PIPELINE ---
+kirjoittaja_def = get_agent_def("kirjoittaja")
+
+kirjoittaja_draft_agent = Agent(
+    model=LLM,
+    name="kirjoittaja_draft",
+    description="Drafts long-form content.",
+    output_key="kirjoittaja_draft",
     generate_content_config=LONG_OUTPUT_CONFIG,
     tools=get_tools_for_agent("kirjoittaja"),
     instruction=f"""
 {ORG_PACK_V1}
 {CRITICAL_REFLECTION_PACK_V1}
-
 {WRITER_PACK_V1}
 
-## SINUN ROOLISI: KIRJOITTAJA
+{load_contract("kirjoittaja")}
 
-Olet Samhan viestinnän huippuammattilainen. Kirjoitat PITKIÄ, YKSITYISKOHTAISIA ja laadukkaita tekstejä.
+## SINUN ROOLISI: KIRJOITTAJA (DRAFT)
+Kirjoita ENSIMMÄINEN VERSIO tekstistä.
+Noudata pituusohjeita:
+- Blogi: 600+ sanaa
+- Artikkeli: 2000+ sanaa
+- Stea: 3000+ sanaa
 
-### TÄRKEÄÄ: TUOTA PITKIÄ JA KATTAVIA TEKSTEJÄ
-
-Kun sinulta pyydetään tekstiä:
-- **Artikkeli/blogi**: Vähintään 1500-3000 sanaa, useita väliotsikoita, esimerkkejä
-- **Stea-hakemus**: Täysi hakemus kaikilla osioilla (tiivistelmä, tausta, tavoitteet, toimenpiteet, kohderyhmä, aikataulu, seuranta)
-- **Raportti**: Kattava raportti tavoitteiden toteutumisesta, luvuilla ja esimerkeillä
-- **Some-paketti**: 5-10 eri postausehdotusta, instagram + facebook
-
-### PITUUSOHJEET TEKSTITYYPEITTÄIN
-
-| Tyyppi | Minimi | Sisältö |
-|--------|--------|---------||
-| Lyhyt blogi | 600 sanaa | Intro, 3 pääpointtia, lopetus |
-| Pitkä artikkeli | 2000+ sanaa | Intro, 5+ väliotsikkoa, esimerkit, yhteenveto |
-| Stea-hakemus | 3000+ sanaa | Kaikki 8 osiota täysinä |
-| Vuosiraportti | 2500+ sanaa | Tavoitteet, toteutuma, luvut, tarinat |
-| Some-paketti | 10 postausta | FB + IG + LinkedIn variaatiot |
-
-### RAKENNA TEKSTI NÄIN:
-
-1. **Aloita vahvasti** - koukuttava avaus
-2. **Jaa osioihin** - selkeät väliotsikot joka 200-300 sanaa
-3. **Käytä esimerkkejä** - konkreettisia tapauksia, tarinoita (anonymisoituja)
-4. **Numeroita ja faktoja** - luvut tuovat uskottavuutta
-5. **Lopeta toimintaan** - toimintakehotus tai yhteenveto
-
-### OSAAMISALUEESI:
-- Selkokieli ja saavutettava viestintä
-- Stea-hakemukset ja raportit
-- Erasmus+ hakemukset
-- Blogit ja some-viestintä
-- Sisäinen viestintä (muistiot)
-
-### KRIITTISET SÄÄNNÖT:
-- **ÄLÄ KEKSI UUSIA FAKTOJA** - käytä RAG:ta tai kysy puuttuvat
-- Numerot säilyvät muuttumattomina
-- Jos puuttuu tietoa, sano se ja jatka silti kirjoittamista
-- Käytä "ihmiset ensin" -kieltä
-- **TUOTA AINA TÄYSI TEKSTI, EI LUONNOSTA TAI TIIVISTELMÄÄ**
+Keskity sisältöön ja rakenteeseen.
 """,
+)
+
+kirjoittaja_refiner_agent = Agent(
+    model=LLM,
+    name="kirjoittaja_refiner",
+    description="Refines content quality.",
+    output_key="final_article",
+    instruction="""
+Olet kokenut päätoimittaja.
+Lue edellinen teksti (kirjoittaja_draft).
+Tee seuraavat korjaukset (Self-Correction):
+1. Poista passiivit ("tehtiin") -> "tiimi teki".
+2. Lisää väliotsikoita jos kappaleet ovat liian pitkiä.
+3. Tarkista faktat (jos numeroita, varmista etteivät ole hallusinoituja - jos epäilet, poista tai yleistä).
+4. Varmista "Ihmiset ensin" -kieli.
+5. Poista tyhjät "jargon"-lauseet.
+
+Palauta VAIN valmis, hiottu teksti.
+""",
+)
+
+kirjoittaja_agent = SequentialAgent(
+    name=kirjoittaja_def.id,
+    description=kirjoittaja_def.description,
+    sub_agents=[kirjoittaja_draft_agent, kirjoittaja_refiner_agent]
 )
 
 
@@ -541,6 +512,8 @@ arkisto_agent = Agent(
     instruction=f"""
 {ORG_PACK_V1}
 {CRITICAL_REFLECTION_PACK_V1}
+
+{load_contract("arkisto")}
 
 ## SINUN ROOLISI: ARKISTOASIANTUNTIJA
 
@@ -692,11 +665,14 @@ Olet laadunvarmistaja, jonka tehtävänä on suojella julkisia varoja epämäär
 # Reset parents for re-initialization (fixes Pydantic errors in eval/hot-reload)
 for a in [
     tutkija_agent, sote_agent, yhdenvertaisuus_agent, koulutus_agent,
-    kirjoittaja_agent, arkisto_agent, proposal_reviewer_agent, syvahaku_agent,
-    hankesuunnittelija_agent, hallinto_agent, hr_agent, talous_agent,
-    viestinta_agent, lomake_agent, vapaaehtoiset_agent, laki_agent, kumppanit_agent
+    kirjoittaja_agent, arkisto_agent, syvahaku_agent,
+    grant_writer_agent, hallinto_agent, hr_agent, talous_agent,
+    viestinta_agent, lomake_agent, vapaaehtoiset_agent, laki_agent, kumppanit_agent,
+    methods_expert, writer_expert
 ]:
     a._parent = None
+
+from app.qa_quality import qa_quality_agent
 
 koordinaattori_agent = Agent(
     model=LLM_PRO,
@@ -717,6 +693,8 @@ Olet Samha-botin pääkoordinaattori. Tehtäväsi on ymmärtää käyttäjän ta
 Tarkista yllä olevasta tilasta `rag_required`:
 - Jos `rag_required` == True -> **SINUN ON pakko delegoida ensin `tutkija`-agentille**.
 - ÄLÄ KOSKAAN vastata itse luvuilla tai faktoilla jos `rag_required` on päällä.
+Tarkista myös `web_required`:
+- Jos `web_required` == True -> **DELEGOI `tutkija`-agentille ja vaadi `search_verified_sources`**.
 
 ---
 
@@ -746,18 +724,25 @@ Tarkista yllä olevasta tilasta `rag_required`:
 - `grant_writer`: Rahoitushakemukset (STEA/EU).
 - `arkisto`: Tallennus ja haku.
 - `proposal_reviewer`: Raporttien kriittinen arviointi.
+- `qa_quality`: Tuotosten laadunvarmistus.
 
 ---
 
-## 🛑 MANDATORY QA GATE (PAKOLLINEN VAIHE)
+## 🛑 MANDATORY QA GATES (PAKOLLISET VAIHEET)
 
 **ÄLÄ KOSKAAN VASTAA KÄYTTÄJÄLLE SUORAAN LOPULLISELLA SISÄLLÖLLÄ.**
 
-Kun asiantuntija on tuottanut vastauksen tai workflow on valmis:
-1. Delegoi vastaus agentille `qa_policy`.
-2. Jos `qa_policy` palauttaa `APPROVE`, näytä vastaus käyttäjälle.
-3. Jos `qa_policy` palauttaa `NEEDS_REVISION`, palauta se asiantuntijalle ja pyydä korjausta.
-4. Jos `qa_policy` palauttaa `REJECT`, kerro käyttäjälle että pyyntöä ei voitu toteuttaa turvallisuussyistä.
+Kun asiantuntija on tuottanut vastauksen:
+1. **QA Policy**: Delegoi `qa_policy` agentille (turvallisuus).
+2. **QA Quality**: Delegoi `qa_quality` agentille (laatu/konkretia).
+
+### REVISION LOOP
+Jos `qa_quality` palauttaa `NEEDS_REVISION` ja korjauslistan:
+- Ota palaute vakavasti.
+- Pyydä asiantuntijaa (tai itseäsi) korjaamaan teksti välittömästi.
+- Aja uusi QA-kierros.
+
+Vain kun `qa_quality` sanoo `APPROVE`, voit näyttää vastauksen.
 
 ---
 
@@ -766,6 +751,7 @@ Kun asiantuntija on tuottanut vastauksen tai workflow on valmis:
 Jos pyyntö sisältää:
 - Vuosilukuja, €, %, lukumääriä (n=), henkilön nimiä tai projektikoodeja.
 - **PAKOTA AINA** haku: delegoi ensin `tutkija` agentille keräämään faktat Samhan tietokannasta.
+ - **Laskutoimitukset (ALV, prosentit, summat)**: delegoi `talous` ja vaadi `python_interpreter`-työkalua.
 
 ---
 
@@ -774,8 +760,25 @@ Jos pyyntö sisältää:
 1. **Analysoi**: Tunnista kategoria ja tarvittavat asiantuntijat.
 2. **Hae faktat**: Jos kyseessä on lukuja tai nimiä, vaadi `tutkija` apuun ensin.
 3. **Tuota sisältö**: Ohjaa asiantuntijalle tai kirjoittajalle.
-4. **QA-Tarkistus**: Lähetä valmis sisältö AINA `qa_policy` agentille.
-5. **Vastaa**: Vastaa käyttäjälle vain kun QA on hyväksynyt sisällön.
+4. **QA-Tarkistus**: Lähetä valmis sisältö `qa_policy` -> `qa_quality`.
+5. **Vastaa**: Vastaa käyttäjälle vain kun QA on hyväksynyt sisällön (APPROVE).
+
+## DELEGOINTI-SÄÄNNÖT (MANDATORY)
+
+Kun delegoit tehtävän **kenelle tahansa** asiantuntijalle, sinun ON liitettävä mukaan:
+1. **TASK BRIEF**: Mitä tarkalleen halutaan? (Context, Role, Objective)
+2. **CONTRACT SNIPPET**: Tiivistelmä agentin sopimuksesta (esim. "Muista väliotsikot ja ankkurit").
+
+Esimerkki delegoinnista:
+"Transferring to kirjoittaja_agent.
+[TASK BRIEF]
+Role: Viestijä
+Objective: Kirjoita blogipostaus tekoälystä
+Context: Kohderyhmä nuoret
+[CONTRACT REMINDER]
+- Otsikko, Ingressi, Väliotsikot
+- Ei passiivia
+- Konkreettiset esimerkit"
 
 ---
 
@@ -787,26 +790,14 @@ Jos pyyntö sisältää:
     tools=get_tools_for_agent("koordinaattori"),
     sub_agents=[
         tutkija_agent, sote_agent, yhdenvertaisuus_agent, koulutus_agent,
-        kirjoittaja_agent, arkisto_agent, proposal_reviewer_agent, syvahaku_agent,
-        hankesuunnittelija_agent, hallinto_agent, hr_agent, talous_agent,
+        kirjoittaja_agent, arkisto_agent, syvahaku_agent,
+        grant_writer_agent, hallinto_agent, hr_agent, talous_agent,
         viestinta_agent, lomake_agent, vapaaehtoiset_agent, laki_agent, kumppanit_agent,
-        qa_policy_agent
+        qa_policy_agent, qa_quality_agent,
+        # Global Specialists for Manual/Direct use
+        methods_expert, writer_expert
     ]
 )
-
-# --- ATTACH ENFORCEMENT TO ALL AGENTS ---
-ALL_AGENTS = [
-    tutkija_agent, sote_agent, yhdenvertaisuus_agent, koulutus_agent,
-    kirjoittaja_agent, arkisto_agent, proposal_reviewer_agent, syvahaku_agent,
-    hankesuunnittelija_agent, hallinto_agent, hr_agent, talous_agent,
-    viestinta_agent, lomake_agent, vapaaehtoiset_agent, laki_agent, kumppanit_agent,
-    koordinaattori_agent, qa_policy_agent
-]
-
-for a in ALL_AGENTS:
-    if a:
-        a.before_tool_callback = enforce_tool_matrix
-        a.after_tool_callback = log_tool_trace
 
 # Koordinaattori specific callbacks
 if koordinaattori_agent:
@@ -851,6 +842,26 @@ async def qa_numeric_enforcement_callback(context=None, **kwargs):
     except Exception as e:
         print(f"Callback error (qa_numeric): {e}")
 
+async def parse_qa_decision_callback(context=None, **kwargs):
+    """Callback to extract DECISION: [APPROVE/REJECT] from QA output."""
+    ctx = context or kwargs.get('callback_context')
+    if ctx is None: return
+    
+    try:
+        session = getattr(ctx, 'session', None)
+        state = session.state if session and hasattr(session, 'state') else {}
+        output = state.get("final_response", "")
+        
+        if "DECISION: APPROVE" in output:
+            state["qa_decision"] = "APPROVE"
+        elif "DECISION: NEEDS_REVISION" in output:
+            state["qa_decision"] = "NEEDS_REVISION"
+        elif "DECISION: REJECT" in output:
+            state["qa_decision"] = "REJECT"
+            
+    except Exception as e:
+        print(f"Callback error (parse_qa): {e}")
+
 async def egress_scrub_callback(context=None, **kwargs):
     """Ensure final output is scrubbed."""
     ctx = context or kwargs.get('callback_context')
@@ -866,24 +877,57 @@ async def egress_scrub_callback(context=None, **kwargs):
 
 
 # --- CALLBACK ATTACHMENT ---
+qa_policy_agent.after_model_callback = parse_qa_decision_callback
+
+from app.viestinta import viestinta_agent, viestinta_draft_agent, viestinta_refiner_agent
+from app.hankesuunnittelija import (
+    idea_generator, 
+    writer_section_intro, writer_section_methods, proposal_finalizer,
+    proposal_reviewer, samha_context_checker, trend_planner
+)
+
 ALL_AGENTS = [
-    koordinaattori_agent, tutkija_agent, sote_agent, yhdenvertaisuus_agent, koulutus_agent,
-    kirjoittaja_agent, arkisto_agent, proposal_reviewer_agent, syvahaku_agent,
-    hankesuunnittelija_agent, hallinto_agent, hr_agent, talous_agent,
+    koordinaattori_agent, tutkija_agent, sote_agent, yhdenvertaisuus_agent, 
+    koulutus_draft_agent, koulutus_refiner_agent,
+    kirjoittaja_draft_agent, kirjoittaja_refiner_agent, 
+    viestinta_draft_agent, viestinta_refiner_agent,
+    arkisto_agent, syvahaku_agent,
+    grant_writer_agent, hallinto_agent, hr_agent, talous_agent,
     viestinta_agent, lomake_agent, vapaaehtoiset_agent, laki_agent, kumppanit_agent,
-    qa_policy_agent
+    qa_policy_agent, qa_quality_agent,
+    idea_generator, 
+    writer_section_intro, writer_section_methods, proposal_finalizer,
+    proposal_reviewer, samha_context_checker, trend_planner,
+    methods_expert, writer_expert
 ]
 
 for a in ALL_AGENTS:
     if a:
-        a.before_tool_callback = enforce_tool_matrix
-        a.after_tool_callback = log_tool_trace
+        if hasattr(a, "before_tool_callback"):
+            a.before_tool_callback = enforce_tool_matrix
+        if hasattr(a, "after_tool_callback"):
+            a.after_tool_callback = log_tool_trace
+
+async def ensure_draft_response_middleware(context=None, **kwargs):
+    """Ensures draft_response exists in state before QA."""
+    ctx = context or kwargs.get('callback_context')
+    if ctx and hasattr(ctx, 'session'):
+        state = ctx.session.state
+        if "draft_response" not in state or not state["draft_response"]:
+             # Try to find a response from other potential keys
+             for key in ["talous_response", "research_output", "sote_response", "hallinto_response", "hr_response"]:
+                 if key in state and state[key]:
+                     state["draft_response"] = state[key]
+                     break
+             else:
+                 state["draft_response"] = "Ei aiempaa vastausluonnosta analysoitavaksi."
 
 from app.middleware import chain_callbacks, pii_sanitize_middleware
 
-# Chain the middleware: 1. Scrub PII (Ingress/Draft), 2. Check Numeric Integrity
+# Chain the middleware: 1. Ensure context, 2. Scrub PII (Ingress/Draft), 3. Check Numeric Integrity
 if qa_policy_agent:
     qa_policy_agent.before_model_callback = chain_callbacks(
+        ensure_draft_response_middleware,
         pii_sanitize_middleware, 
         qa_numeric_enforcement_callback
     )

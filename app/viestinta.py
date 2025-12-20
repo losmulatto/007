@@ -9,11 +9,12 @@ Erikoistuneita agentteja viestintään:
 
 import datetime
 import os
-from google.adk.agents import Agent
+from google.adk.agents import Agent, SequentialAgent
 from google.genai import types as genai_types
 
 # Import ORG_PACK
 from app.prompt_packs import ORG_PACK_V1
+from app.contracts_loader import load_contract
 
 # Import Shared Tools
 from app.tools_base import retrieve_docs, LLM, LONG_OUTPUT_CONFIG
@@ -217,86 +218,68 @@ VIESTINTA_OHJEET = """
 6. **Yhteystiedot** - Lisätiedot medialle
 """
 
-viestinta_agent = Agent(
+viestinta_draft_agent = Agent(
     model=LLM,
-    name="viestinta",
-    description="Viestintäasiantuntija. Tekee some-postauksia, uutiskirjeitä, tiedotteita ja monikielisiä viestejä Samhan äänellä.",
-    output_key="viestinta_response",
+    name="viestinta_draft",
+    description="Drafts communication materials.",
+    output_key="viestinta_draft",
     generate_content_config=VIESTINTA_CONFIG,
     tools=[retrieve_docs, translate_text, format_social_post, create_newsletter_section, generate_samha_image],
     instruction=f"""
 {ORG_PACK_V1}
-
-## SINUN ROOLISI: VIESTINTÄASIANTUNTIJA
-
-Olet Samhan viestintävastaava. Erikoisalueesi on:
-1. **Some-postaukset** - Instagram, Facebook, LinkedIn, X
-2. **Uutiskirjeet** - Kuukausittaiset päivitykset
-3. **Tiedotteet** - Medialle ja sidosryhmille
-4. **Monikielinen viestintä** - Suomi, englanti, arabia, somali
-
----
-
+{load_contract("viestinta")}
 {VIESTINTA_OHJEET}
 
----
-
-## SAMHAN ÄÄNI VIESTINNÄSSÄ
-
-### Äänensävy
-- **Lämmin** mutta **ammattimainen**
-- **Toiveikas** mutta **realistinen**
-- **Helposti lähestyttävä** mutta **asiantunteva**
-
-### Kielivalinnat
-✅ "Ihmiset, joiden kanssa teemme työtä"
-❌ "Kohderyhmämme" / "Asiakkaamme"
-
-✅ "Matala kynnys" / "Helppo tulla mukaan"
-❌ "Palvelumme tarjoavat..."
-
-✅ "Yhdessä" / "Yhteisö"
-❌ "Me autamme heitä"
-
----
-
-## TYÖKALUT
-
-- **translate_text(text, target_language)**: Käännä sisältö
-- **format_social_post(message, platform)**: Muotoile someen
-- **create_newsletter_section(title, content, cta)**: Uutiskirjeen osio
-
----
-
-## ESIMERKKEJÄ
-
-### Instagram-postaus (vertaistukiryhmä)
-```
-🌿 Tuntuuko arki joskus raskaalta?
-
-Samhan vertaistukiryhmissä voit jakaa kokemuksiasi turvallisessa ympäristössä. 
-Sinun ei tarvitse selvitä yksin.
-
-📍 Visbynkuja 2, Helsinki
-🗓️ Joka keskiviikko klo 17-19
-🌐 Monikielinen (suomi, arabia, somali)
-
-Tervetuloa sellaisena kuin olet. 💚
-
-#SamhaRy #Vertaistuki #Mielenterveys #Helsinki
-```
-
-### Tiedote (rahoituspäätös)
-```
-TIEDOTE [pvm]
-
-Samha ry sai merkittävän STEA-rahoituksen mielenterveystyöhön
-
-Samha ry:lle on myönnetty X euron avustus...
-```
-
-Current date: {datetime.datetime.now().strftime("%Y-%m-%d")}
+## SINUN ROOLISI: VIESTINTÄASIANTUNTIJA (DRAFT)
+Tuota ENSIMMÄINEN VERSIO viestistä.
+Muista Samhan äänensävy.
 """,
+)
+
+viestinta_refiner_agent = Agent(
+    model=LLM,
+    name="viestinta_refiner",
+    description="Refines communication materials.",
+    output_key="viestinta_response",
+    instruction="""
+Olet kokenut viestintäpäällikkö.
+Lue edellinen viesti (viestinta_draft).
+Korjaa ja paranna:
+1. Varmista "Ihmiset ensin" -kieli (ei "kohderyhmä", vaan "ihmiset").
+2. Poista kapulakieli ("jalkauttaminen") -> "tekeminen".
+3. PAKOTOLLINEN: Lisää Call-to-Action (CTA). Esim: "Lue lisää", "Ota yhteyttä", "Tule mukaan".
+4. Tarkista emojien määrä (maltillisuus).
+
+Palauta vain valmis, hiottu teksti.
+""",
+)
+
+def _ensure_cta(text: str) -> str:
+    if not text:
+        return text
+    cta_keywords = ["ota yhteyttä", "lue lisää", "tule mukaan", "ilmoittaudu", "tutustu", "kysy lisää", "liity"]
+    lowered = text.lower()
+    if any(k in lowered for k in cta_keywords):
+        return text
+    return text.rstrip() + "\n\nOta yhteyttä tai tule mukaan — kerromme mielellämme lisää."
+
+async def viestinta_cta_callback(context=None, **kwargs):
+    ctx = context or kwargs.get("callback_context")
+    if not ctx:
+        return
+    session = getattr(ctx, "session", None)
+    if not session or not hasattr(session, "state"):
+        return
+    state = session.state
+    response = state.get("viestinta_response", "")
+    state["viestinta_response"] = _ensure_cta(response)
+
+viestinta_refiner_agent.after_model_callback = viestinta_cta_callback
+
+viestinta_agent = SequentialAgent(
+    name="viestinta",
+    description="Viestintäasiantuntija. Tekee some-postauksia, uutiskirjeitä, tiedotteita ja monikielisiä viestejä Samhan äänellä.",
+    sub_agents=[viestinta_draft_agent, viestinta_refiner_agent]
 )
 
 

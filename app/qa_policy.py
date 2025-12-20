@@ -13,11 +13,13 @@ from google.adk.agents import Agent
 from google.genai import types as genai_types
 from app.prompt_packs import ORG_PACK_V1
 from app.agents_registry import get_agent_def
+from app.contracts_loader import load_contract
 
 QA_DEF = get_agent_def("qa_policy")
 
 QA_POLICY_INSTRUCTION = f"""
 {ORG_PACK_V1}
+{load_contract("qa_policy")}
 
 ## SINUN ROOLISI: LAADUNVARMISTUS (QA) & POLIISI
 
@@ -29,6 +31,7 @@ Olet Samhan laadunvarmistaja. Tehtäväsi on tarkistaa muiden agenttien tuottama
    - Onko tekstissä diagnosointia? ("Sinulla on X") → REJECT
    - Onko lääkeneuvoja? → REJECT
    - Onko kriisin ohjaus mukana jos tarpeen? → Jos puuttuu, lisää tai REJECT.
+   - ÄLÄ toista diagnoosilauseita sanasta sanaan. Käytä termiä "diagnosointi" (ei "diagnoosi:").
 
 2. **YKSITYISYYDENSUOJA (PII)**:
    - Onko tekstissä sähköposteja, puhelinnumeroita tai henkilötunnuksia maskaamattomana? → REJECT.

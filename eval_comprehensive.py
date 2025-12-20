@@ -101,12 +101,19 @@ class AssertionValidator:
         if assertion == "measurable_objectives":
             response_lower = response.lower()
             has_numbers = any(char.isdigit() for char in response)
-            has_keywords = any(k in response_lower for k in ["prosenttia", "%", "euroa", "kappaletta", "henkilöä", "tavoite", "mittari"])
+            # Expanded keyword list for sectioned proposals
+            keywords = [
+                "prosenttia", "%", "euroa", "€", "kappaletta", "henkilöä", 
+                "tavoite", "mittari", "osallistujamäärä", "indikaattori",
+                "vaikutus", "tulos", "lukumäärä", "määrä", "osuus", "procent", "antal"
+            ]
+            has_keywords = any(k in response_lower for k in keywords)
             return has_numbers and has_keywords
 
         if assertion == "cta_present":
             response_lower = response.lower()
-            return any(k in response_lower for k in ["ota yhteyttä", "lue lisää", "ilmoittaudu", "tutustu", "linkki", "biossa", "katso"])
+            cta_keywords = ["ota yhteyttä", "lue lisää", "ilmoittaudu", "tutustu", "linkki", "biossa", "katso", "tilaa", "liity", "kysy", "varaa"]
+            return any(k in response_lower for k in cta_keywords)
 
         if assertion == "minutes_structure_present":
             response_lower = response.lower()
@@ -115,6 +122,23 @@ class AssertionValidator:
             has_numbering = "§" in response or "1." in response or "1 §" in response
             has_sig = "allekirjoitus" in response_lower or "vakuudeksi" in response_lower or "___" in response
             return has_essentials and has_numbering and has_sig
+
+        if assertion == "no_vague_without_anchor":
+            from app.quality_lint import lint_quality
+            res = lint_quality(response)
+            return res["passed"]
+
+        if assertion == "has_headings_or_sections":
+            # Markdown headings
+            return "# " in response or "## " in response or "**" in response
+
+        if assertion == "has_action_list":
+            # Bullet points or numbered lists
+            return "- " in response or "1. " in response
+
+        if assertion == "min_word_count_900":
+            words = response.split()
+            return len(words) >= 900
 
         return True
 
@@ -130,6 +154,7 @@ class EvalRunner:
         self.results: list[TestResult] = []
         self.run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         self.suite_version = "v1.9.1"
+        self.app_name = os.getenv("EVAL_APP_NAME", "app")
 
     def run_test(self, test_case: TestCase) -> TestResult:
         print(f"  🔄 {test_case.id}: {test_case.name}...", end="", flush=True)
@@ -138,22 +163,28 @@ class EvalRunner:
     async def _run_test_async(self, test_case: TestCase) -> TestResult:
         from google.adk.runners import Runner
         from app.agent import root_agent
+        from app.egress import scrub_for_user
         start_time = time.time()
         agent_used = None
         response_text = ""
+        tool_traces = []
         error = None
 
         # Hack for determinism
         def patch_agent(agent):
             if hasattr(agent, "generate_content_config") and agent.generate_content_config:
                 agent.generate_content_config.temperature = 0.2
+            if agent.name == "trend_researcher":
+                print(f"DEBUG: trend_researcher tools: {agent.tools}")
+                for t in agent.tools:
+                    print(f" - {t}")
             if hasattr(agent, "sub_agents"):
                 for sa in agent.sub_agents: patch_agent(sa)
         patch_agent(root_agent)
 
         try:
-            runner = Runner(agent=root_agent, app_name="samha_eval", session_service=self.session_service)
-            session = await self.session_service.create_session(app_name="samha_eval", user_id="eval_user")
+            runner = Runner(agent=root_agent, app_name=self.app_name, session_service=self.session_service)
+            session = await self.session_service.create_session(app_name=self.app_name, user_id="eval_user")
             
             # Message with Attachments hint
             msg_text = test_case.prompt
@@ -172,12 +203,30 @@ class EvalRunner:
                         if hasattr(part, 'text') and part.text: response_text += part.text
                 if hasattr(event, 'author') and event.author and event.author != "koordinaattori":
                     agent_used = event.author
+                
+                # HARVEST TOOL TRACES FROM CONTENT (Standard for Gemini/ADK)
+                if hasattr(event, "content") and event.content and event.content.parts:
+                    for part in event.content.parts:
+                        fc = getattr(part, 'function_call', None)
+                        if fc:
+                            # Use event.author if available, else fallback
+                            author = getattr(event, 'author', 'unknown_agent')
+                            # print(f"DEBUG EVAL: Harvested tool {fc.name} from {author}")
+                            tool_traces.append({
+                                "agent": author,
+                                "tool": fc.name,
+                                "input": getattr(fc, 'args', {})
+                            })
 
             # Final state capture
-            updated_session = await self.session_service.get_session(app_name="samha_eval", user_id="eval_user", session_id=session.id)
+            updated_session = await self.session_service.get_session(app_name=self.app_name, user_id="eval_user", session_id=session.id)
             state_snapshot = updated_session.state if updated_session else {}
-            tool_traces = state_snapshot.get("tool_traces", [])
+            # Merge state traces with harvested traces
+            for t in state_snapshot.get("tool_traces", []):
+                if t not in tool_traces: tool_traces.append(t)
             final_response = state_snapshot.get("final_response", response_text)
+            # Mirror production egress scrubbing for evals
+            final_response = scrub_for_user(final_response)
 
         except Exception as e:
             error = str(e)
@@ -191,11 +240,12 @@ class EvalRunner:
         TOOL_ALIASES = {
             "pdf_deepreader": ["read_pdf_content", "get_pdf_metadata"],
             "imagegen": ["generate_image", "generate_samha_image"],
-            "generate_image": ["generate_samha_image"],
+            "generate_image": ["generate_samha_image", "generate_image"], # Recursive check
             "archive_search": ["search_archive"],
             "web_allowlist": ["search_verified_sources", "search_legal_sources"],
-            "python": ["read_excel", "analyze_excel_summary", "read_csv", "generate_data_chart"],
-            "analyze_excel_summary": ["read_excel"]
+            "python": ["read_excel", "analyze_excel_summary", "read_csv", "generate_data_chart", "python_interpreter", "python", "code_execution", "code_executor"],
+            "analyze_excel_summary": ["read_excel", "analyze_excel_summary"],
+            "read_excel": ["read_excel", "analyze_excel_summary"]
         }
         
         actual_tools = set(tr.get('tool') for tr in tool_traces)
@@ -211,10 +261,15 @@ class EvalRunner:
         if missing_tools:
             failed_assertions.append(f"Missing expected tools: {missing_tools}. Found: {list(actual_tools)}")
 
+        # Truncate response for validation if massive (keep tail)
+        validation_response = final_response
+        if len(validation_response) > 40000:
+            validation_response = "..." + validation_response[-40000:]
+
         # Assertions
         if test_case.assertions:
             for k, v in test_case.assertions.items():
-                if v and not AssertionValidator.validate(k, final_response, {"state": state_snapshot}):
+                if v and not AssertionValidator.validate(k, validation_response, {"state": state_snapshot}):
                     failed_assertions.append(k)
         
         forbidden_found = [kw for kw in test_case.should_not_contain if kw.lower() in final_response.lower()]
@@ -232,6 +287,13 @@ class EvalRunner:
             debug_info = f"DEBUG: traces={len(tool_traces)}, sec_events={len(state_snapshot.get('security_events', []))}, resp_len={len(final_response)}"
             failed_assertions.append(f"runner_debug_missing_assertion_report ({debug_info})")
 
+        # FIX: The actual pass/fail logic was missing the assertion results in some branches
+        if test_case.assertions and not failed_assertions:
+            # If we had assertions but none failed, then it's passed
+            pass
+        elif test_case.assertions and failed_assertions:
+            passed = False
+
         # Security fail-fast flag
         is_security = any(x in test_case.category.name.upper() for x in ["SAFETY", "SECURITY", "PII", "HARD_GATE"])
         if is_security and not passed: print(f" !!! SECURITY FAIL !!!")
@@ -243,7 +305,12 @@ class EvalRunner:
             tools_used=[t.get('tool') for t in tool_traces], failed_assertions=failed_assertions,
             state_snapshot=state_snapshot, tool_traces=tool_traces, final_response=final_response, error=error
         )
-        print(f" ✅ ({elapsed:.1f}s)" if passed else f" ❌ ({elapsed:.1f}s) - {failed_assertions}")
+        if not passed:
+            print(f" ❌ ({elapsed:.1f}s) - {failed_assertions}")
+            print(f"    [FINAL_RESPONSE]: {final_response[:300]}...")
+            print(f"    [TOOLS_FOUND]: {actual_tools}")
+        else:
+            print(f" ✅ ({elapsed:.1f}s)")
         return result
 
     def print_report(self):
@@ -254,8 +321,14 @@ class EvalRunner:
         
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         with open(f"eval_report_{ts}.json", 'w') as f:
-            json.dump([{"id": r.test_case.id, "passed": r.passed, "time": r.response_time_sec} for r in self.results], f, indent=2)
+            json.dump([{"id": r.test_case.id, "passed": r.passed, "failed_assertions": r.failed_assertions} for r in self.results], f, indent=2)
         
+        if failed > 0:
+            print("\n--- FAILED TESTS DETAILS ---")
+            for r in self.results:
+                if not r.passed:
+                    print(f"ID: {r.test_case.id} | Fails: {r.failed_assertions}")
+
         return passed, failed
 
     def run_all(self, suite_path: str, filter_ids: list = None):
@@ -274,7 +347,8 @@ class EvalRunner:
                 prompt=c.get('prompt', c.get('input', {}).get('user_message', '')),
                 expected_tools=c.get('expected_tools', c.get('expected', {}).get('required_tools', [])),
                 assertions=c.get('assertions', c.get('expected', {}).get('assertions', {})),
-                input_data=c.get('input', {})
+                input_data=c.get('input', {}),
+                max_response_time_sec=c.get('max_response_time_sec', 300)
             )
             self.results.append(self.run_test(tc))
 

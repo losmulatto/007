@@ -30,8 +30,14 @@ Flow:
 """
 
 import datetime
+import logging
+import re
+from typing import AsyncGenerator
 from google.genai import types as genai_types
-from google.adk.agents import LlmAgent, SequentialAgent
+from google.adk.agents import LlmAgent, SequentialAgent, LoopAgent, BaseAgent
+from google.adk.events import Event, EventActions
+from google.adk.agents.invocation_context import InvocationContext
+from app.contracts_loader import load_contract
 from app.prompt_packs import (
     ORG_PACK_V1,
     QA_PORT_PACK_V1,
@@ -52,6 +58,15 @@ RESEARCH_TOOLS = [
     TOOL_MAP[ToolId.READ_PDF]
 ]
 BASIC_TOOLS = [TOOL_MAP[ToolId.RETRIEVE_DOCS]]
+
+# Import Deep Search Pipeline
+from app.deep_search import get_research_pipeline, syvahaku_agent
+from app.ammattilaiset import arkisto_agent
+
+
+# =============================================================================
+# LOOP CONTROL & CUSTOM AGENTS
+# =============================================================================
 
 
 # =============================================================================
@@ -76,41 +91,58 @@ CRITIC_CONFIG = genai_types.GenerateContentConfig(
 # =============================================================================
 
 # Step 1: Trend Research
-trend_researcher = LlmAgent(
+# Step 1: Deep Search Integration (Trend Analysis)
+
+# Phase 0: Samha Context Check
+samha_context_checker = LlmAgent(
     model=WORKER_MODEL,
-    name="trend_researcher",
-    description="Tutkii ajankohtaiset trendit, rahoittajaprioriteetit ja tarpeet.",
+    name="samha_context_checker",
+    description="Ensures research alignment with Samha values and target groups.",
     instruction=f"""
-## SINUN ROOLISI: TRENDIANALYYTIKKO
-{CRITICAL_REFLECTION_PACK_V1}
+{load_contract("tutkija")}
+{ORG_PACK_V1}
 
-Tutki hankeideointia varten:
-1. Ajankohtaiset trendit ja tutkimukset aiheesta.
-2. Soveltuvat rahoituskanavat (Kansalliset sote-avustukset, EU-ohjelmat, säätiöt tai kunnalliset avustukset).
-3. Kohderyhmän tarpeet ja haasteet.
-4. Innovatiiviset lähestymistavat muualta.
+## TARKISTUSVAIHE (PHASE 0)
+Tehtäväsi on varmistaa, että tuleva trenditutkimus kohdistuu oikein.
 
-### TEHTÄVÄ
-Käytä työkaluja (`search_verified_sources`, `search_news`, `search_web`, `retrieve_docs`) löytääksesi:
-- Uusimmat tutkimukset ja tilastot.
-- Rahoitusmahdollisuudet (etsi parhaiten sopivat).
-- Onnistuneet esimerkit vastaavista hankkeista.
-- Aukot nykyisessä palvelutarjonnassa.
+Tarkista (`retrieve_docs`) tai lue ORG_PACK:
+1. **Kohderyhmät**: Keitä Samha palvelee? (Maahanmuuttajat, syrjäytymisriskissä olevat)
+2. **Arvot**: Onko hanke linjassa matalan kynnyksen ja kulttuurisensitiivisyyden kanssa?
 
-## EVIDENSSIVAATIMUS (PAKOLLINEN)
-Jos väität mitään faktuaalista (vuosi, %, määrä, "uusin"), näytä heti perässä lähde:
-- **Otsikko**: ...
-- **URL**: https://...
-- **Todiste**: 1–2 lausetta mitä sivu sanoo ja mihin kohtaan hanketta se vaikuttaa.
-
-**Älä käytä alaviitteitä. Älä keksi lukuja (Numeric Integrity).** Jos et löydä dataa työkaluilla, kirjoita "tieto puuttuu" ja listaa mitä pitää hakea.
-
-### OUTPUT
-Tuota tiivistelmä Markdown-muodossa, jossa jokaisessa osiossa on vähintään yksi todiste.
+Jos käyttäjän idea on selvästi ristiriidassa (esim. "Vain kantasuomalaisille"), ilmoita siitä.
+Muuten, anna lupa jatkaa tutkimukseen ja KIRJAA YLÖS konteksti seuraavaa vaihetta varten.
 """,
-    tools=RESEARCH_TOOLS,
-    output_key="trend_analysis",
+    tools=[TOOL_MAP[ToolId.RETRIEVE_DOCS]],
+    output_key="samha_context",
 )
+
+# Phase 1: Auto-Planning (Automated Trend Planner)
+trend_planner = LlmAgent(
+    model=PLANNER_MODEL,
+    name="trend_planner",
+    description="Generates an automated research plan for trend analysis.",
+    instruction=f"""
+You are a generic research planner.
+OUTPUT LANGUAGE: FINNISH.
+Your goal is to create a RESEARCH PLAN to investigate trends, funding, and needs for the user's project idea.
+
+CONTEXT FROM PHASE 0:
+{{samha_context}}
+
+**TASK**
+Create a 5-point research plan to:
+1. Identify current trends and statistics.
+2. Find suitable funding instruments (STEA, EU, Foundations).
+3. Analyze target group needs (specifically Samha's groups).
+4. Look for benchmarks/innovations.
+
+**OUTPUT FORMAT**
+Bulleted list where each line starts with `[RESEARCH]`.
+DO NOT ask for user approval. This is an automated pipeline.
+""",
+    output_key="research_plan",
+)
+
 
 
 # Step 2: Idea Generation
@@ -121,6 +153,7 @@ idea_generator = LlmAgent(
     generate_content_config=LONG_OUTPUT_CONFIG,
     instruction=f"""
 ## SINUN ROOLISI: HANKEIDEOIJA
+{load_contract("hankesuunnittelija")}
 {CRITICAL_REFLECTION_PACK_V1}
 {FUNDING_TYPES_PACK_V1}
 
@@ -130,7 +163,7 @@ Valitse 1 "suositeltu konsepti" ja lukitse nämä kentät:
 - **non_negotiables**: 5 sääntöä joita ei rikota (esim. "ei kansainvälisiä matkoja stea:ssa", "ei hoitoa, vain tuki/ohjaus")
 Jatkovaiheissa et saa muuttaa instrumenttia ilman että kerrot "instrument_change_reason".
 
-Lue trendianalyysi: `{{trend_analysis}}`
+Lue trendianalyysi: `{{final_cited_report}}`
 
 ### TEHTÄVÄ
 Ideoi 3-5 innovatiivista hankekonseptia, jotka vastaavat trendejä. 
@@ -160,9 +193,11 @@ sote_validator = LlmAgent(
     description="Arvioi hankeidean sote-näkökulmasta.",
     instruction=f"""
 ## SINUN ROOLISI: SOTE-ASIANTUNTIJA (VALIDOINTI)
+{load_contract("sote")}
 {CRITICAL_REFLECTION_PACK_V1}
 
 Lue hankeideat: `{{project_ideas}}`
+Lue edellinen auditointipalautte (jos on): `{{proposal_review?}}`
 
 ### TEHTÄVÄ
 
@@ -195,10 +230,12 @@ yhdenvertaisuus_validator = LlmAgent(
     description="Arvioi hankeidean yhdenvertaisuusnäkökulmasta.",
     instruction=f"""
 ## SINUN ROOLISI: YHDENVERTAISUUS-ASIANTUNTIJA (VALIDOINTI)
+{load_contract("yhdenvertaisuus")}
 {CRITICAL_REFLECTION_PACK_V1}
 
 Lue hankeideat: `{{project_ideas}}`
 Lue SOTE-arviointi: `{{sote_validation}}`
+Lue edellinen auditointipalautte (jos on): `{{proposal_review?}}`
 
 ### TEHTÄVÄ
 
@@ -231,12 +268,14 @@ methods_planner = LlmAgent(
     generate_content_config=LONG_OUTPUT_CONFIG,
     instruction=f"""
 ## SINUN ROOLISI: KOULUTUSSUUNNITTELIJA (MENETELMÄT)
+{load_contract("koulutus")}
 {CRITICAL_REFLECTION_PACK_V1}
 
 Lue:
 - Hankeideat: `{{project_ideas}}`
 - SOTE-arviointi: `{{sote_validation}}`
 - Yhdenvertaisuusarviointi: `{{yhdenvertaisuus_validation}}`
+- Edellinen auditointipalautte (jos on): `{{proposal_review?}}`
 
 ### TEHTÄVÄ
 
@@ -261,49 +300,122 @@ Tuota menetelmäsuunnitelma:
 )
 
 
-# Step 6: Proposal Writing
-proposal_writer = LlmAgent(
+# Step 6: Proposal Writing (Phase A: Needs & Context)
+writer_section_intro = LlmAgent(
     model=PLANNER_MODEL,
-    name="proposal_writer",
-    description="Kirjoittaa hakemusluonnoksen.",
+    name="writer_section_intro",
+    description="Kirjoittaa hakemuksen tarveperustelut ja taustatiedoat.",
     generate_content_config=LONG_OUTPUT_CONFIG,
     instruction=f"""
-## SINUN ROOLISI: KIRJOITTAJA (HAKEMUS)
-{CRITICAL_REFLECTION_PACK_V1}
-{FUNDING_TYPES_PACK_V1}
+## ROOLI: KIRJOITTAJA (OSA 1: TARVE & TAUSTA)
+{load_contract("kirjoittaja")}
 
-Lue kaikki aiemmat vaiheet:
-- Trendianalyysi: `{{trend_analysis}}`
+Lue:
+- Trendianalyysi: `{{final_cited_report}}`
 - Hankeideat: `{{project_ideas}}`
-- SOTE-arviointi: `{{sote_validation}}`
-- Yhdenvertaisuusarviointi: `{{yhdenvertaisuus_validation}}`
-- Menetelmäsuunnitelma: `{{methods_plan}}`
+- Edellinen auditointipalautte (jos on): `{{proposal_review?}}`
+
+### KORJAUSTILA (REVISION MODE) - TÄRKEÄ!
+Jos kontekstista löytyy aiempi `{{proposal_review}}` ja `{{proposal_section_intro}}`:
+1. **Lue kritiikki**: Katso mitä `proposal_review` vaatii korjaamaan tässä osiossa.
+2. **Korjaa**: Tee vaaditut muutokset (esim. "tarkenna kohderyhmää", "lisää statustietoa").
+3. **Raportoi**: Listaa vastauksen alkuun: "Korjattu palautteen perusteella: [lista muutoksista]".
 
 ### TEHTÄVÄ
-Kirjoita TÄYSI hakemusluonnos valitulle rahoittajalle. 
-**Noudata FUNDING_TYPES_PACK_V1:n sääntöjä orjallisesti.**
+Kirjoita hakemuksen alkuosa:
+1. **Hankkeen nimi ja lyhyt kuvaus**.
+2. **Tarve ja tausta**: Miksi hanke tarvitaan nyt? Käytä trendianalyysin faktoja.
+3. **Kohderyhmä**: Ketä hanke auttaa?
 
-## NUMERIC INTEGRITY
-Et saa kirjoittaa yhtään numeroa (€, %, osallistujamäärä, vuodet) ellei se ole:
-a) Annettu inputissa, tai
-b) Löydetty työkaluilla ja listattu "lähteet"-osiossa.
-Muuten kirjoita "tieto puuttuu" ja tee paikka täydennettäväksi.
+**KIRJOITA ERITTÄIN YKSITYISKOHTAISESTI JA PITKÄÄN.** Älä tiivistä.
 
 ### OUTPUT
-Tuota täysi hakemus, joka sisältää kaikki tarvittavat osiot. Lisää loppuun "Käytetyt lähteet" -osio (ilman alaviitteitä).
-""" ,
+Tuota Markdown-sisältöä vain näille osioille.
+""",
+    tools=BASIC_TOOLS,
+    output_key="proposal_section_intro",
+)
+
+# Step 7: Proposal Writing (Phase B: Implementation & Methods)
+writer_section_methods = LlmAgent(
+    model=PLANNER_MODEL,
+    name="writer_section_methods",
+    description="Kirjoittaa hakemuksen toteutus- ja menetelmäosiot.",
+    generate_content_config=LONG_OUTPUT_CONFIG,
+    instruction=f"""
+## ROOLI: KIRJOITTAJA (OSA 2: TOTEUTUS & MENETELMÄT)
+{load_contract("kirjoittaja")}
+
+Lue:
+- Menetelmäsuunnitelma: `{{methods_plan}}`
+- Hankeideat: `{{project_ideas}}`
+- SOTE & Yhdenvertaisuus: `{{sote_validation}}`, `{{yhdenvertaisuus_validation}}`
+- Edellinen auditointipalautte (jos on): `{{proposal_review?}}`
+
+### KORJAUSTILA (REVISION MODE) - TÄRKEÄ!
+Jos kontekstista löytyy aiempi `{{proposal_review}}` ja `{{proposal_section_methods}}`:
+1. **Lue kritiikki**: Etsi palautteesta menetelmiin liittyvät huomiot.
+2. **Korjaa**: Muokkaa toimintoja tai resursointia palautteen mukaan.
+3. **Raportoi**: Listaa vastauksen alkuun: "Korjattu palautteen perusteella: [lista]".
+
+### TEHTÄVÄ
+Kirjoita hakemuksen ydin:
+1. **Tavoitteet**: Mitä halutaan saavuttaa (SMART)?
+2. **Toiminnot ja menetelmät**: Mitä hanke tekee käytännössä? Kirjoita auki jokainen työpaja ja menetelmä.
+3. **Resurssit**: Kuka tekee ja mitä tarvitaan?
+
+**KIRJOITA ERITTÄIN YKSITYISKOHTAISESTI JA PITKÄÄN.** Älä tiivistä.
+
+### OUTPUT
+Tuota Markdown-sisältöä vain näille osioille.
+""",
+    tools=BASIC_TOOLS,
+    output_key="proposal_section_methods",
+)
+
+# Step 8: Proposal Writing (Phase C: Finalizer)
+proposal_finalizer = LlmAgent(
+    model=PLANNER_MODEL,
+    name="proposal_finalizer",
+    description="Yhdistää hakemuksen osat ja lisää vaikuttavuuden.",
+    generate_content_config=LONG_OUTPUT_CONFIG,
+    instruction=f"""
+## ROOLI: KIRJOITTAJA (OSA 3: VAIKUTTAVUUS & KOOSTE)
+{load_contract("kirjoittaja")}
+
+Lue:
+- Intro: `{{proposal_section_intro}}`
+- Methods: `{{proposal_section_methods}}`
+- Edellinen auditointipalautte (jos on): `{{proposal_review?}}`
+
+### KORJAUSTILA (FINAL CHECK)
+Jos kontekstista löytyy aiempi `{{proposal_review}}`:
+- Varmista, että kaikki "ROADMAP TO 85+" -kohdat on huomioitu.
+- Jos jotain puuttuu, lisää se nyt.
+
+### TEHTÄVÄ
+Viimeistele hakemus:
+1. **Tulokset ja vaikuttavuus**: Mitä jää jäljelle? Miten toiminta jatkuu?
+2. **Koostaminen**: Yhdistä aiemmat osat yhdeksi sujuvaksi kokonaisuudeksi.
+3. **Lähdeluettelo**: Listaa kaikki trendianalyysissä ja kirjoittajilla käytetyt lähteet.
+
+**VARMISTA ETTÄ LOPPUTULOS ON TÄYDELLINEN, AMMATTIMAINEN HAKEMUS.**
+
+### OUTPUT
+Tuota täysi hakemusluonnos, joka yhdistää kaikki osat.
+""",
     tools=BASIC_TOOLS,
     output_key="proposal_draft",
 )
 
 
-# Step 7: Proposal Review
+# Step 9: Proposal Review (Dynamic Criteria Discovery)
 proposal_reviewer = LlmAgent(
     model=PLANNER_MODEL,
     name="proposal_reviewer",
     generate_content_config=CRITIC_CONFIG,
     tools=RESEARCH_TOOLS,
-    description="Arvioi hakemusluonnosta ja antaa palautetta kriittisesti hyödyntäen virallisia oppaita.",
+    description="Etsii rahoittajakohtaiset kriteerit ja arvioi hakemuksen niiden perusteella.",
     instruction=f"""
 {ORG_PACK_V1}
 {RADICAL_AUDITOR_PACK_V1}
@@ -311,33 +423,43 @@ proposal_reviewer = LlmAgent(
 {GOLD_FAILURE_PACK_V1}
 {FUNDING_TYPES_PACK_V1}
 
-## SINUN ROOLISI: THE ENFORCER (RADICAL AUDITOR)
+## SINUN ROOLISI: DYNAMIC AUDITOR (THE ENFORCER)
+{load_contract("proposal_reviewer")}
 
-Lue koko prosessin kulku ja erityisesti hakemusluonnos: `{{proposal_draft}}`
+Lue hakemusluonnos: `{{proposal_draft}}`
 
-## AUDIT-PROTOKOLLA (PAKOLLINEN JÄRJESTYS)
-1. **Hae ohjeet**: Hae ensin virallinen ohjelmaopas tai rahoittajan ohje (`retrieve_docs` tai `search_verified_sources`) ja listaa URL:t.
-2. **Faktojen tarkistus**: Poimi hakemuksesta 10 kriittistä väitettä (instrumentti, kohderyhmä, toiminta, mittarit, budjetti-logiikka).
-3. **Vastakkainasettelu**: Jokaiselle väitteelle: Status OK/EI OK + Lähde-URL + korjausohje.
+## VAIHE 1: KRITEERIEN ETSINTÄ (PAKOLLINEN)
+Sinun on ensin haettava työkaluilla (`retrieve_docs` tai `search_web`) **juuri tämän haun kriteerit**. 
+Esimerkkejä:
+- Jos hakemus on STEA-hanke -> "STEA 2026 kriteerit ja hakuohjeet"
+- Jos Erasmus+ -> "Erasmus+ Programme Guide 2025 quality criteria"
+- Jos Säätiö -> Etsi kyseisen säätiön hakuohjeet.
+
+Listaa löytyneet lähteet (URL tai doc nimi).
+
+## VAIHE 2: AUDITOINTI
+Arvioi hakemus löytämiesi spesifien sääntöjen perusteella. 
+Älä käytä yleistä kaavaa, jos löydät tarkempia ohjeita.
 
 ### ARVIOINTI-MODUS
-1. **Aloita DESTRUCTION PHASE**: Listaa 3 kriittistä syytä, miksi tämä hanke on tällä hetkellä epäonnistuminen.
-2. **Pisteytys**: Käytä 0-100 asteikkoa (61+ = Läpäisy).
-3. **Sektoripoliisi**: Tarkista rahoitusinstrumentin mukaisuus (FUNDING_TYPES_PACK_V1).
+1. **DESTRUCTION PHASE**: Listaa 3 kriittistä syytä, miksi tämä hanke on tällä hetkellä epäonnistuminen löydettyjen kriteerien valossa.
+2. **Pisteytys**: Käytä 0-100 asteikkoa (Kokonaispisteet: XX / 100). **THRESHOLD 85/100**.
+3. **Veroitus**: Jos pisteet ovat alle 85, kerro TÄSMÄLLEEN mitä pitää kirjoittaa lisää tai korjata seuraavalla kierroksella.
 
 ### OUTPUT FORMAT
 ```markdown
-# Hakemusarviointi: RADICAL AUDIT REPORT
+# Hakemusarviointi: DYNAMIC AUDIT REPORT
+**Löydetyt kriteerilähteet:** [Lista]
 
-## Destructive Analysis (Red Team)
+## Destructive Analysis
 ...
 
 ## Kokonaispisteet: XX / 100 
 
 ## Väitteiden auditointi (10 kpl)
-- [Väite]: [Status] | [URL] | [Ohje]
+...
 
-## ROADMAP TO 81+ (Actionable Remediation)
+## ROADMAP TO 85+ (Korjausohjeet seuraavalle kierrokselle)
 ...
 ```
 """ ,
@@ -345,65 +467,114 @@ Lue koko prosessin kulku ja erityisesti hakemusluonnos: `{{proposal_draft}}`
 )
 
 
-# =============================================================================
-# MAIN WORKFLOW
-# =============================================================================
+from app.ammattilaiset import get_arkisto_agent, get_specialist_agent
+from google.adk.agents import SequentialAgent
 
-hankesuunnittelija_pipeline = SequentialAgent(
-    name="hankesuunnittelija_pipeline",
-    description="Täysi hankesuunnitteluprosessi: trendianalyysi → ideointi → validointi → menetelmät → hakemus → arviointi",
-    sub_agents=[
-        trend_researcher,
-        idea_generator,
-        sote_validator,
-        yhdenvertaisuus_validator,
-        methods_planner,
-        proposal_writer,
-        proposal_reviewer,
-    ],
+# Fresh instances for the automated pipeline to avoid parentage conflicts
+# with the manual coordinator's sub_agents.
+auto_intro = get_specialist_agent("kirjoittaja", suffix="_auto_intro", output_key="proposal_section_intro")
+auto_methods = get_specialist_agent("kirjoittaja", suffix="_auto_methods", output_key="proposal_section_methods")
+auto_finalizer = get_specialist_agent("kirjoittaja", suffix="_auto_finalizer", output_key="proposal_draft")
+auto_sote = get_specialist_agent("sote", suffix="_auto", output_key="sote_validation")
+auto_yhdenvertaisuus = get_specialist_agent("yhdenvertaisuus", suffix="_auto", output_key="yhdenvertaisuus_validation")
+auto_koulutus = get_specialist_agent("koulutus", suffix="_auto", output_key="methods_plan")
+
+# Update factory to handle reviewer or instantiate manually
+auto_reviewer = LlmAgent(
+    model=PLANNER_MODEL,
+    name="proposal_reviewer_auto",
+    generate_content_config=CRITIC_CONFIG,
+    tools=RESEARCH_TOOLS,
+    description="Etsii rahoittajakohtaiset kriteerit ja arvioi hakemuksen niiden perusteella.",
+    instruction=proposal_reviewer.instruction 
 )
 
+# Automated Writing Pipeline
+auto_writing_pipeline = SequentialAgent(
+    name="auto_writing_pipeline",
+    sub_agents=[auto_intro, auto_methods, auto_finalizer],
+    description="Automated 3-phase writing process."
+)
 
-hankesuunnittelija_agent = LlmAgent(
-    name="hankesuunnittelija",
-    model=WORKER_MODEL,
-    description="Ideoi ja kehittää uusia hankeideoita tutkimusten perusteella. Ketjuttaa kaikkien asiantuntijoiden läpi: tutkimus → sote → yhdenvertaisuus → menetelmät → hakemus.",
+# Full Automated Pipeline
+automated_full_process = SequentialAgent(
+    name="automated_full_process",
+    description="Täysi automaattinen hankesuunnitteluprosessi tutkimuksesta arviointiin.",
+    sub_agents=[
+        samha_context_checker, # This might still conflict if shared... I'll use a factory if I need to.
+        trend_planner,
+        get_research_pipeline(),
+        idea_generator,
+        auto_sote,
+        auto_yhdenvertaisuus,
+        auto_koulutus,
+        auto_writing_pipeline,
+        auto_reviewer
+    ]
+)
+
+grant_writer_agent = LlmAgent(
+    name="grant_writer",
+    model=PLANNER_MODEL,
+    description="Kirjoittaa ja kehittää rahoitushakemuksia (STEA, EU, Säätiöt). Hallitsee koko prosessia ideoinnista lopulliseen hakemukseen.",
     instruction=f"""
-## SINUN ROOLISI: HANKESUUNNITTELIJA
+## SINUN ROOLISI: GRANT WRITER (HANKESUUNNITTELUN KOORDINAATTORI)
+{load_contract("hankesuunnittelija")}
 
-Olet Samhan hankesuunnittelun pääkoordinaattori. Autat ideoimaan ja kehittämään uusia hankeideoita.
+Olet Samhan johtava hankesuunnittelija ja rahoitusasiantuntija. Ohjaat projektia vaihe vaiheelta.
 
-### PROSESSI
+### PROSESSI (AUTOMAATTINEN ALOITUS)
 
-Kun käyttäjä pyytää hankeideoita, käynnistät automaattisen ketjun:
+Kun käyttäjä pyytää aloittamaan uuden hakemuksen tai ideoimaan hanketta ("Suunnittele hanke...", "Aloitetaan haku..."), 
+**DELEGOI VÄLITTÖMÄSTI `automated_full_process` agentille**. Se hoitaa koko ketjun kerralla.
 
-1. **Trendianalyysi** → Tutkii trendit ja rahoittajaprioriteetit
-2. **Ideointi** → Generoi 3-5 hankekonseptia
-3. **SOTE-validointi** → Arvioi sote-näkökulmasta
-4. **Yhdenvertaisuus-validointi** → Arvioi antirasisminäkökulmasta
-5. **Menetelmäsuunnittelu** → Suunnittelee konkreettiset toiminnot
-6. **Hakemuskirjoitus** → Kirjoittaa täyden hakemuksen
-7. **QA-arviointi** → Arvioi ja antaa palautetta
+### PAKOLLINEN MITATTAVUUS (TARVE & TAVOITTEET)
+Jos käyttäjä pyytää "tarve ja tavoitteet" tai vain "tavoitteet":
+- Kirjoita **vähintään 3 mitattavaa tavoitetta numeroilla** (esim. osallistujamäärä, työpajojen määrä, %-osuus).
+- Käytä sanaa **"Tavoite"** jokaisessa kohdassa.
 
-### MILLOIN KÄYTETÄÄN
+### MANUAALINEN / KORJAAVA KONTROLLI
+Jos käyttäjä pyytää vain yhtä osiota tai haluaa PALATA aiempaan vaiheeseen:
+1. **Palaa vaiheeseen X** -> Delegoi suoraan kyseiselle agentille (lista alla).
+2. **Korjaa X palautteen perusteella** -> Delegoi kyseiselle agentille.
 
-- "Ideoi uusi hanke nuorten mielenterveydestä"
-- "Kehitä antirasismihanke Erasmus+:lle"
-- "Suunnittele STEA-hanke vertaistukiryhmille"
+### SUB-AGENTS (MANUAALISEEN KÄYTTÖÖN)
+- `methods_planner`: Toiminta ja menetelmät.
+- `writer_section_intro`: Taustat ja tarpeet.
+- `writer_section_methods`: Toiminnot ja resurssit.
+- `proposal_finalizer`: Vaikuttavuus ja koonti.
 
-### OHJEET
-
-1. Kysy tarvittaessa tarkentavia kysymyksiä
-2. Käynnistä `hankesuunnittelija_pipeline`
-3. Esitä lopputulos käyttäjälle
-4. Kysy haluaako käyttäjä arkistoida hakemuksen
+### ARKISTOINTI
+- Kun hakemus on valmis, ehdota tallennusta: "Arkistoi tämä".
 
 Current date: {datetime.datetime.now().strftime("%Y-%m-%d")}
 """,
-    sub_agents=[hankesuunnittelija_pipeline],
+    sub_agents=[
+        automated_full_process,
+        methods_planner,
+        writer_section_intro, 
+        writer_section_methods, 
+        proposal_finalizer, 
+        proposal_reviewer,
+        get_arkisto_agent(suffix="_pipeline")
+    ],
     output_key="final_proposal",
 )
 
-
 # Export
-root_agent = hankesuunnittelija_agent
+root_agent = grant_writer_agent
+
+__all__ = [
+    "root_agent",
+    "grant_writer_agent",
+    "automated_full_process",
+    "idea_generator", 
+    "sote_validator",
+    "yhdenvertaisuus_validator",
+    "methods_planner",
+    "writer_section_intro",
+    "proposal_finalizer",
+    "proposal_reviewer",
+    "samha_context_checker",
+    "trend_planner",
+]

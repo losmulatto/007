@@ -103,6 +103,10 @@ OFFICIAL_PATTERNS = [
     r'\basetus\b',
     r'\bprogramme guide\b',
     r'\boph.*ohje',
+    # Tilastot -> vaadi viralliset lähteet
+    r'\btilasto',
+    r'\btilastotieto',
+    r'\bstatisti',
 ]
 
 # Henkilönimet - yksinkertainen heuristiikka (isot alkukirjaimet)

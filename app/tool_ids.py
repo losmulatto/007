@@ -15,6 +15,7 @@ class ToolId(str, Enum):
     READ_CSV = "read_csv"
     ANALYZE_EXCEL = "analyze_excel_summary"
     LIST_EXCEL_SHEETS = "list_excel_sheets"
+    PYTHON_INTERPRETER = "python_interpreter"
     
     # Advanced / Admin
     PROCESS_MEETING = "process_meeting_transcript"

@@ -16,6 +16,7 @@ from app.agents_registry import get_agent_def
 
 # Import ORG_PACK
 from app.prompt_packs import ORG_PACK_V1
+from app.contracts_loader import load_contract
 
 # Import Shared Tools
 from app.tools_base import retrieve_docs, LLM, LONG_OUTPUT_CONFIG
@@ -42,6 +43,7 @@ LOMAKE_OHJEET = """
 - **Kohderyhmä**: Määrittele tarkasti (esim. maahanmuuttajanuoret Vantaalla).
 - **Tarve**: Perustele tarve tilastoilla tai havainnoilla.
 - **Toimenpiteet**: Kuvaile konkreettiset askeleet tavoitteiden saavuttamiseksi.
+- **Pakollinen mittaririvi**: Kun käyttäjä pyytää tavoitteita, kirjoita aina vähintään 3 mitattavaa tavoitetta numeroilla (esim. "Tavoite 1: 120 osallistujaa", "Tavoite 2: 6 työpajaa", "Tavoite 3: 80 % osallistujista ...").
 
 ### Erasmus+ Raportointi
 - **Impact (Vaikuttavuus)**: Kuvaile vaikutus osallistujiin ja organisaatioon.
@@ -66,6 +68,7 @@ lomake_agent = Agent(
     tools=[retrieve_docs, read_pdf_content],  # As per registry
     instruction=f"""
 {ORG_PACK_V1}
+{load_contract("lomakkeet")}
 
 ## SINUN ROOLISI: LOMAKEASIANTUNTIJA
 

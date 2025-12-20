@@ -38,6 +38,13 @@ def search_archive(
     limit: int = 5,
 ) -> str:
     """Hae arkistosta."""
+    allowed_types = {"hakemus", "raportti", "artikkeli", "koulutus", "some", "memo", "muu"}
+    if document_type:
+        doc_norm = document_type.strip().lower()
+        if doc_norm not in allowed_types:
+            # Fallback to broad search if type is not supported
+            doc_norm = ""
+        document_type = doc_norm
     archive = get_archive_service()
     search_query = ArchiveSearchQuery(
         query=query if query else None,

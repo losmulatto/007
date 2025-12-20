@@ -14,7 +14,7 @@ def scrub_for_user(text: str) -> str:
         return ""
     
     # Run the regex-based scrubber
-    scrubbed = pii_scrubber(text)
+    scrubbed, _ = pii_scrubber(text)
     
     return scrubbed
 

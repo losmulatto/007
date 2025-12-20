@@ -43,7 +43,8 @@ def finance_numeric_integrity_check(payload: Dict[str, Any]) -> Dict[str, Any]:
     # vaadi laskentajälki (python/pandas tai excel-analyysi) tai rag-lähde (jos kyse on sisäisestä raportista)
     # Check if tool trace contains calculation tools
     required_calc_tools = [
-        "python", 
+        "python",
+        ToolId.PYTHON_INTERPRETER,
         ToolId.READ_EXCEL, 
         ToolId.ANALYZE_EXCEL, 
         ToolId.RETRIEVE_DOCS,

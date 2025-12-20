@@ -38,7 +38,7 @@ RESEARCH_TOOLS = [
 ADMIN_TOOLS = [ToolId.RETRIEVE_DOCS, ToolId.READ_PDF, ToolId.PROCESS_MEETING]
 FINANCE_TOOLS = [
     ToolId.RETRIEVE_DOCS, ToolId.READ_EXCEL, ToolId.READ_CSV,
-    ToolId.ANALYZE_EXCEL, ToolId.GENERATE_CHART
+    ToolId.ANALYZE_EXCEL, ToolId.GENERATE_CHART, ToolId.PYTHON_INTERPRETER
 ]
 CREATIVE_TOOLS = [
     ToolId.RETRIEVE_DOCS, ToolId.GENERATE_IMAGE, 
@@ -200,6 +200,14 @@ SAMHA_AGENT_REGISTRY: Dict[str, AgentMetadata] = {
         category=QA_POLICY,
         description="Varmistaa vastauksen laadun, turvallisuuden ja Samha-linjan.",
         allowed_tools=[],  # No tools, pure reasoning
+        prompt_pack_versions=["org_pack_v1"],
+    ),
+    "qa_quality": AgentMetadata(
+        id="qa_quality",
+        display_name="QA Quality",
+        category=QA_POLICY,
+        description="Varmistaa roolifitin, konkretian ja deliverable-tason.",
+        allowed_tools=[],
         prompt_pack_versions=["org_pack_v1"],
     ),
 }

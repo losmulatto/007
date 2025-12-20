@@ -1,5 +1,12 @@
 from app.tool_ids import ToolId
-from app.tools_base import retrieve_docs, read_excel, read_csv, analyze_excel_summary, list_excel_sheets
+from app.tools_base import (
+    retrieve_docs,
+    read_excel,
+    read_csv,
+    analyze_excel_summary,
+    list_excel_sheets,
+    python_interpreter,
+)
 from app.web_search import search_web, search_verified_sources, search_news, search_legal_sources
 from app.pdf_tools import read_pdf_content, get_pdf_metadata
 from app.advanced_tools import process_meeting_transcript, generate_data_chart, schedule_samha_meeting
@@ -26,6 +33,7 @@ TOOL_MAP = {
     ToolId.READ_CSV: read_csv,
     ToolId.ANALYZE_EXCEL: analyze_excel_summary,
     ToolId.LIST_EXCEL_SHEETS: list_excel_sheets,
+    ToolId.PYTHON_INTERPRETER: python_interpreter,
     ToolId.TRANSLATE: translate_text,
     ToolId.FORMAT_SOCIAL: format_social_post,
     ToolId.CREATE_NEWSLETTER: create_newsletter_section,
@@ -51,6 +59,7 @@ FUNCTION_NAME_TO_TOOL_ID = {
     "read_csv": ToolId.READ_CSV,
     "analyze_excel_summary": ToolId.ANALYZE_EXCEL,
     "list_excel_sheets": ToolId.LIST_EXCEL_SHEETS,
+    "python_interpreter": ToolId.PYTHON_INTERPRETER,
     "translate_text": ToolId.TRANSLATE,
     "format_social_post": ToolId.FORMAT_SOCIAL,
     "create_newsletter_section": ToolId.CREATE_NEWSLETTER,

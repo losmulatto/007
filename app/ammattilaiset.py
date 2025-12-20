@@ -12,6 +12,7 @@ import os
 import datetime
 import google.auth
 from google.adk.agents import Agent
+from app.contracts_loader import load_contract
 from google.genai import types as genai_types
 from langchain_google_vertexai import VertexAIEmbeddings
 
@@ -24,8 +25,11 @@ from app.advanced_tools import process_meeting_transcript, generate_data_chart, 
 # Import PDF tools
 from app.pdf_tools import read_pdf_content, get_pdf_metadata
 
+# Import Archive tools
+from app.archive_tools import save_to_archive, search_archive, get_archived_content
+
 # Import Prompt Packs
-from app.prompt_packs import ORG_PACK_V1, FINANCE_PACK_V1
+from app.prompt_packs import ORG_PACK_V1, FINANCE_PACK_V1, CRITICAL_REFLECTION_PACK_V1, WRITER_PACK_V1, SOTE_PACK_V1, YHDENVERTAISUUS_PACK_V1
 
 # Import RAG tools
 from app.retrievers import get_retriever, get_compressor
@@ -33,6 +37,7 @@ from app.retrievers import get_retriever, get_compressor
 
 from app.tools_base import (
     retrieve_docs, read_excel, read_csv, analyze_excel_summary, list_excel_sheets,
+    python_interpreter,
     LLM as _BASE_LLM, LLM_TALOUS as _BASE_LLM_TALOUS, LONG_OUTPUT_CONFIG as _BASE_LONG_CONFIG
 )
 
@@ -40,11 +45,10 @@ from app.tools_base import (
 # CONFIGURATION
 # =============================================================================
 
-# Standard model for hallinto and hr agents
-LLM = "gemini-3-flash-preview"
-
-# Pro model for talous agent - maximum reliability for financial data
-LLM_TALOUS = "gemini-3-pro-preview"
+# Standard model (stable)
+LLM = "gemini-3-flash-preview" 
+LLM_TALOUS = "gemini-3-flash-preview"  # Align with gemini-3-flash per request
+LLM_PRO = "gemini-3-pro-preview" 
 
 LONG_OUTPUT_CONFIG = genai_types.GenerateContentConfig(
     temperature=1.0,  # Gemini 3 recommended (lower causes looping)
@@ -65,10 +69,16 @@ TOOL_MAP_LITE = {
     "read_csv": read_csv,
     "analyze_excel_summary": analyze_excel_summary,
     "list_excel_sheets": list_excel_sheets,
+    "python_interpreter": python_interpreter,
     "read_pdf_content": read_pdf_content,
     "get_pdf_metadata": get_pdf_metadata,
     "generate_data_chart": generate_data_chart,
+    "generate_data_chart": generate_data_chart,
     "process_meeting_transcript": process_meeting_transcript,
+    # Archive Tools
+    "save_to_archive": save_to_archive,
+    "search_archive": search_archive,
+    "get_archived_content": get_archived_content,
 }
 
 def get_tools_for_agent(agent_id: str):
@@ -113,11 +123,12 @@ hallinto_agent = Agent(
     model=LLM,
     name=hallinto_def.id,
     description=hallinto_def.description,
-    output_key="hallinto_response",
+    output_key="draft_response",
     generate_content_config=LONG_OUTPUT_CONFIG,
     tools=get_tools_for_agent("hallinto"),
     instruction=f"""
 {ORG_PACK_V1}
+{load_contract("hallinto")}
 ## SINUN ROOLISI: HALLINTO-AMMATTILAINEN
 
 Olet Samhan hallinnon asiantuntija. Erikoisalueesi on yhdistyksen viralliset asiakirjat ja dokumentaatio suomalaisen lainsäädännön mukaisesti.
@@ -279,11 +290,12 @@ hr_agent = Agent(
     model=LLM,
     name=hr_def.id,
     description=hr_def.description,
-    output_key="hr_response",
+    output_key="draft_response",
     generate_content_config=LONG_OUTPUT_CONFIG,
     tools=get_tools_for_agent("hr"),
     instruction=f"""
 {ORG_PACK_V1}
+{load_contract("hr")}
 ## SINUN ROOLISI: HR-AMMATTILAINEN
 
 Olet Samhan HR-asiantuntija. Erikoisalueesi on työsopimukset, henkilöstöhallinnon dokumentit ja sopimukset suomalaisen lainsäädännön mukaisesti.
@@ -457,25 +469,137 @@ TALOUS_LAINSAADANTO = """
 4. Toimintakertomus (jos vaaditaan)
 """
 
-from app.prompt_packs import ORG_PACK_V1, FINANCE_PACK_V1
+from app.prompt_packs import ORG_PACK_V1, FINANCE_PACK_V1, CRITICAL_REFLECTION_PACK_V1, WRITER_PACK_V1
 
 def build_instruction(*packs: str) -> str:
     return "\n\n".join(packs)
 
-# --- TALOUS-AMMATTILAINEN ---
+# --- TALOUS-AMMATTILAINEN (REFACTORED FOR AFC STABILITY) ---
 talous_def = get_agent_def("talous")
-talous_agent = Agent(
-    model=LLM_TALOUS,
+from google.adk.code_executors import BuiltInCodeExecutor
+from google.adk.agents import SequentialAgent
+
+# Phase 1: Data Gathering (Excel, CSV, RAG)
+talous_data_agent = Agent(
+    model=LLM, 
+    name="talous_data_reader",
+    description="Lukee talousdataa tiedostoista (Excel, CSV) ja tietokannasta.",
+    tools=get_tools_for_agent("talous"),
+    instruction=f"{ORG_PACK_V1}\nLue pyydetty data tiedostoista tai tietokannasta. Tuota mahdollisimman raaka ja tarkka numerodata seuraavalle vaiheelle.\nJos pyyntö on laskutoimitus (ALV/prosentit/summat) ilman tiedostoa, käytä python_interpreter-työkalua ja palauta laskelma `talous_raw_data`-kenttään.",
+    output_key="talous_raw_data"
+)
+
+# Phase 2: Analysis and Calculation (Python)
+talous_calc_agent = Agent(
+    model=LLM_TALOUS, 
+    name="talous_analyzer",
+    description="Suorittaa laskelmia ja analysoi talousdataa Pythonilla.",
+    code_executor=BuiltInCodeExecutor(),
+    instruction=f"""
+{ORG_PACK_V1}
+{load_contract("talous")}
+{FINANCE_PACK_V1}
+
+Käytä hyväksesi aiemman vaiheen lukemaa dataa: `{{talous_raw_data}}`.
+Laske tarvittavat tunnusluvut, vertailut ja poikkeamat Pythonilla.
+Älä koskaan arvaa lukuja, jos ne puuttuvat.
+""",
+    output_key="draft_response"
+)
+
+# Unified interface to avoid coordination changes
+talous_agent = SequentialAgent(
     name=talous_def.id,
     description=talous_def.description,
-    output_key="talous_response",
-    generate_content_config=TALOUS_CONFIG,
-    tools=get_tools_for_agent("talous"),
-    instruction=build_instruction(
-        ORG_PACK_V1,
-        FINANCE_PACK_V1,
-    ),
+    sub_agents=[talous_data_agent, talous_calc_agent]
 )
+
+
+# =============================================================================
+# PROJECT PLANNING SPECIALISTS (FACTORY)
+# =============================================================================
+
+def get_specialist_agent(agent_id: str, suffix: str = "", output_key: str = None):
+    """Creates a fresh instance of a specialist agent to avoid parent conflicts."""
+    agent_def = get_agent_def(agent_id)
+    if not agent_def:
+        return None
+    
+    # Load contract
+    contract = load_contract(agent_id)
+    
+    # Decide instruction additions based on agent_id
+    extra_prompt = ""
+    if agent_id == "koulutus":
+        # This is the methods_planner
+        extra_prompt = f"{CRITICAL_REFLECTION_PACK_V1}\n## SINUN ROOLISI: KOULUTUSSUUNNITTELIJA (MENETELMÄT)"
+    elif agent_id == "kirjoittaja":
+        # This is the writer
+        extra_prompt = f"{CRITICAL_REFLECTION_PACK_V1}\n{WRITER_PACK_V1}\n## SINUN ROOLISI: KIRJOITTAJA"
+    elif agent_id == "sote":
+        extra_prompt = f"{CRITICAL_REFLECTION_PACK_V1}\n{SOTE_PACK_V1}\n## SINUN ROOLISI: SOTE-VALIDOINTI"
+    elif agent_id == "yhdenvertaisuus":
+        extra_prompt = f"{CRITICAL_REFLECTION_PACK_V1}\n{YHDENVERTAISUUS_PACK_V1}\n## SINUN ROOLISI: YHDENVERTAISUUS-VALIDOINTI"
+
+    return Agent(
+        model=LLM_PRO if agent_id in ["tutkija", "kirjoittaja", "arkisto"] else LLM,
+        name=f"{agent_id}{suffix}",
+        description=agent_def.description,
+        tools=get_tools_for_agent(agent_id),
+        instruction=f"{ORG_PACK_V1}\n{contract}\n{extra_prompt}",
+        output_key=output_key
+    )
+
+# =============================================================================
+# ARKISTO-AMMATTILAINEN (ARCHIVIST)
+# =============================================================================
+
+arkisto_def = get_agent_def("arkisto")
+def get_arkisto_agent(suffix: str = ""):
+    """Creates a fresh instance of the Arkisto Agent."""
+    return Agent(
+        model=LLM,
+        name=f"{arkisto_def.id}{suffix}",
+        description=arkisto_def.description,
+        output_key="arkisto_response",
+        generate_content_config=LONG_OUTPUT_CONFIG,
+        tools=get_tools_for_agent("arkisto"),
+        instruction=f"""
+{ORG_PACK_V1}
+{load_contract("arkisto")}
+## SINUN ROOLISI: PÄIVYSTÄVÄ ARKISTONHOITAJA
+
+Olet Samhan arkistonhoitaja. Olet tarkka, järjestelmällinen ja huolellinen. Käyttäjät kutsuvat sinua nimenomaan tallentamaan tärkeitä dokumentteja.
+
+### TÄRKEÄÄ: KONTEKSTI
+Sinut kutsutaan usein "lennosta". Jos käyttäjä sanoo "Arkistoi tämä", sinun on katsottava keskusteluhistoriasta tai tilasta (`session.state`), mitä on juuri tuotettu (esim. `final_proposal`, `final_cited_report` tai viimeisin viesti).
+
+### 1. TALLENNUSPROSESSI (MANUAALINEN KUTSU)
+Kun käyttäjä pyytää arkistointia:
+
+1. **Identifioi kohde**: Etsi tallennettava teksti.
+2. **Analysoi metatiedot** (TÄRKEIN VAIHE):
+   - **Otsikko**: Jos ei ole, luo kuvaava otsikko (esim. "Stea-hakemus 2025: Nuorten Mielenterveys").
+   - **Tyyppi**: hakemus / raportti / muistio / suunnitelma / muu
+   - **Ohjelma**: stea / erasmus / avustuskeskus / muu
+   - **Hanke**: Tunnista hanke (jalma / koutsi / icat / paikka_auki). Jos uusi, käytä "muu" tai projektin nimeä.
+   - **Päivämäärä**: Tämänhetkinen pvm on {datetime.datetime.now().strftime("%Y-%m-%d")}.
+3. **Luo Tiivistelmä**: Kirjoita 2-3 lauseen tiivistelmä sisällöstä.
+4. **Tallenna**: Kutsu `save_to_archive(...)`.
+
+### 2. HAKUPROSESSI
+Auta löytämään tietoa, kun käyttäjä kysyy "Onko meillä mitään...":
+- Käytä `search_archive` monipuolisesti.
+- Jos löytyy osuma, tarjoa heti tiivistelmä.
+
+### LAATUKRITEERIT (ORGANISOIDUSTI)
+- Älä koskaan tallenna "luonnos" tai "testi" otsikolla, ellei käyttäjä erikseen pyydä.
+- Pyri aina täyttämään kaikki metatiedot. Jos et tiedä hanketta, päättele se sisällöstä.
+""",
+    )
+
+arkisto_agent = get_arkisto_agent()
+# ... talous_agent definition ...
 
 
 # =============================================================================
@@ -486,4 +610,5 @@ __all__ = [
     "hallinto_agent",
     "hr_agent", 
     "talous_agent",
+    "arkisto_agent",
 ]
