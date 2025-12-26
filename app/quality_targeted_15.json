@@ -1,0 +1,199 @@
+{
+    "suite_name": "Quality Targeted 15",
+    "version": "1.0",
+    "cases": [
+        {
+            "id": "write_1_blog",
+            "name": "Write Blog Post",
+            "prompt": "Kirjoita blogipostaus tekoälyn etiikasta nuorisotyössä.",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "has_headings_or_sections": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        },
+        {
+            "id": "write_2_stea",
+            "name": "Write STEA Application",
+            "prompt": "Kirjoita STEA-hakemus \"Nuorten digitaalinen hyvinvointi\" -hankkeelle.",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "has_headings_or_sections": true,
+                    "has_action_list": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        },
+        {
+            "id": "write_3_article",
+            "name": "Write Long Article",
+            "prompt": "Kirjoita pitkä artikkeli maahanmuuttajien kotoutumisesta Helsingissä.",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "has_headings_or_sections": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        },
+        {
+            "id": "write_4_report",
+            "name": "Write Annual Report",
+            "prompt": "Kirjoita vuosiraportti Samhan vuoden 2024 toiminnasta perustuen kuvitteellisiin lukuihin.",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        },
+        {
+            "id": "write_5_memo",
+            "name": "Write Internal Memo",
+            "prompt": "Kirjoita sisäinen muistio uuden toimiston säännöistä.",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "has_action_list": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        },
+        {
+            "id": "edu_1_workshop",
+            "name": "Plan Antiracism Workshop",
+            "prompt": "Suunnittele 2h työpaja antirasismista nuorille.",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "has_action_list": true,
+                    "has_headings_or_sections": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        },
+        {
+            "id": "edu_2_course",
+            "name": "Plan Leadership Course",
+            "prompt": "Suunnittele viikonlopun mittainen johtajuuskoulutus vapaaehtoisille.",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "has_headings_or_sections": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        },
+        {
+            "id": "edu_3_seminar",
+            "name": "Plan Seminar",
+            "prompt": "Suunnittele Mielenterveysseminaarin ohjelmarunko.",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "has_action_list": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        },
+        {
+            "id": "edu_4_training",
+            "name": "Plan Staff Training",
+            "prompt": "Suunnittele henkilökunnan virkistyspäivä.",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        },
+        {
+            "id": "edu_5_online",
+            "name": "Plan Online Webinar",
+            "prompt": "Suunnittele verkkowebinaari aiheesta \"Tunne hyvinvointisi\".",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        },
+        {
+            "id": "comms_1_ig",
+            "name": "Create IG Post",
+            "prompt": "Tee Instagram-postaus uudesta ryhmästä.",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "cta_present": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        },
+        {
+            "id": "comms_2_newsletter",
+            "name": "Create Newsletter",
+            "prompt": "Kirjoita uutiskirjeen pääjuttu syksyn toiminnasta.",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        },
+        {
+            "id": "comms_3_press",
+            "name": "Create Press Release",
+            "prompt": "Kirjoita tiedote uudesta yhteistyöstä kaupungin kanssa.",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "has_headings_or_sections": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        },
+        {
+            "id": "comms_4_fb",
+            "name": "Create FB Event",
+            "prompt": "Kirjoita Facebook-tapahtuman kuvaus kevätjuhlalle.",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "cta_present": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        },
+        {
+            "id": "comms_5_linkedin",
+            "name": "Create LinkedIn Article",
+            "prompt": "Kirjoita LinkedIn-artikkeli järjestökentän muutoksesta.",
+            "expected": {
+                "required_tools": [],
+                "assertions": {
+                    "no_vague_without_anchor": true,
+                    "has_headings_or_sections": true,
+                    "qa_decision": "APPROVE"
+                }
+            }
+        }
+    ]
+}

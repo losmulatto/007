@@ -28,25 +28,14 @@ import uuid
 # ENUMS / LITERALS
 # =============================================================================
 
-DocumentType = Literal[
-    "hakemus",       # Stea, Erasmus+
-    "raportti",      # Vuosikertomus, väliraportti
-    "artikkeli",     # Blogi, julkaisu
-    "koulutus",      # Koulutusrunko, työpaja
-    "some",          # Some-postaukset
-    "memo",          # Sisäinen muistio
-    "muu"
-]
+# DocumentType is now flexible string to allow any document type
+DocumentType = str
 
-Program = Literal["stea", "erasmus", "muu"]
+# Program is now flexible string to allow any program name
+Program = str
 
-Project = Literal[
-    "koutsi",
-    "jalma", 
-    "icat",
-    "paikka_auki",
-    "muu"
-]
+# Project is now a flexible string (not Literal) to allow any project name
+Project = str
 
 ArchiveStatus = Literal[
     "draft",        # Keskeneräinen
@@ -82,9 +71,9 @@ class ArchiveEntry(BaseModel):
     content: str = Field(..., description="Täysi sisältö")
     
     # Classification
-    document_type: DocumentType = Field(..., description="Dokumenttityyppi")
-    program: Program = Field("muu", description="Ohjelma: stea, erasmus, muu")
-    project: Project = Field("muu", description="Hanke")
+    document_type: str = Field(..., description="Dokumenttityyppi (hakemus, raportti, artikkeli, koulutus, some, memo, muu)")
+    program: str = Field("muu", description="Ohjelma (stea, erasmus, muu)")
+    project: str = Field("muu", description="Hanke (vapaa teksti)")
     tags: List[str] = Field(default_factory=list, description="Tagit hakua varten")
     
     # Audience
@@ -458,6 +447,83 @@ class ArchiveService:
             "by_status": by_status,
             "by_program": by_program
         }
+    
+    def delete(self, entry_id: str) -> bool:
+        """
+        Poista arkistokirjaus pysyvästi.
+        
+        Returns:
+            True jos poisto onnistui, False jos ei löytynyt
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            
+            # Get artifact path first
+            row = conn.execute(
+                "SELECT artifact_path FROM entries WHERE id = ?",
+                (entry_id,)
+            ).fetchone()
+            
+            if not row:
+                return False
+            
+            artifact_path = row["artifact_path"]
+            
+            # Delete from database
+            conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+            conn.execute("DELETE FROM entries_fts WHERE id = ?", (entry_id,))
+            conn.commit()
+            
+            # Delete artifact file
+            if artifact_path:
+                p = Path(artifact_path)
+                if p.exists():
+                    p.unlink()
+            
+            print(f"Deleted archive entry: {entry_id}")
+            return True
+    
+    def list_folders(self) -> dict:
+        """
+        Listaa kansiorakenne arkistoista.
+        
+        Returns kuten:
+        {
+            "by_type": [{"name": "hakemus", "count": 5}, ...],
+            "by_program": [{"name": "stea", "count": 3}, ...],
+            "by_project": [{"name": "koutsi", "count": 2}, ...]
+        }
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            # Group by document_type
+            by_type = [
+                {"name": row[0], "count": row[1]}
+                for row in conn.execute(
+                    "SELECT document_type, COUNT(*) FROM entries GROUP BY document_type ORDER BY COUNT(*) DESC"
+                ).fetchall()
+            ]
+            
+            # Group by program
+            by_program = [
+                {"name": row[0], "count": row[1]}
+                for row in conn.execute(
+                    "SELECT program, COUNT(*) FROM entries GROUP BY program ORDER BY COUNT(*) DESC"
+                ).fetchall()
+            ]
+            
+            # Group by project
+            by_project = [
+                {"name": row[0], "count": row[1]}
+                for row in conn.execute(
+                    "SELECT project, COUNT(*) FROM entries GROUP BY project ORDER BY COUNT(*) DESC"
+                ).fetchall()
+            ]
+        
+        return {
+            "by_type": by_type,
+            "by_program": by_program,
+            "by_project": by_project,
+        }
 
 
 # =============================================================================
@@ -718,13 +784,28 @@ def get_archive_service() -> ArchiveService:
     """
     Get or create archive service singleton.
     
-    Uses GCS if ARCHIVE_GCS_BUCKET env var is set, otherwise local storage.
+    Priority:
+    1. Cloud SQL if ARCHIVE_DB_TYPE=cloudsql
+    2. GCS if ARCHIVE_GCS_BUCKET is set  
+    3. Local SQLite otherwise
     """
     global _archive_service
     if _archive_service is None:
+        db_type = os.environ.get("ARCHIVE_DB_TYPE", "").lower()
         bucket_name = os.environ.get("ARCHIVE_GCS_BUCKET")
         
-        if bucket_name:
+        if db_type == "cloudsql":
+            from app.cloud_sql_archive import CloudSQLArchiveService
+            print("Using Cloud SQL Archive")
+            _archive_service = CloudSQLArchiveService(
+                connection_name=os.environ.get("CLOUD_SQL_CONNECTION_NAME"),
+                database=os.environ.get("CLOUD_SQL_DATABASE", "samha_archive"),
+                user=os.environ.get("CLOUD_SQL_USER", "samha_app"),
+                password=os.environ.get("CLOUD_SQL_PASSWORD"),
+                ip=os.environ.get("CLOUD_SQL_IP"),
+                gcs_bucket=bucket_name,
+            )
+        elif bucket_name:
             print(f"Using GCS Archive: gs://{bucket_name}/")
             _archive_service = GCSArchiveService(
                 bucket_name=bucket_name,

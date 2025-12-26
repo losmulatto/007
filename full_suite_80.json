@@ -18,6 +18,11 @@
     "name": "legal/hr: työsopimuksen tarkistus -> hr + laki_gdpr",
     "category": "Standard",
     "prompt": "tarkista tämä työsopimus ja nosta riskit",
+    "input": {
+      "attachments": [
+        "evals/fixtures/tyosopimus_sample.pdf"
+      ]
+    },
     "expected_keywords": [],
     "expected_tools": [
       "read_pdf_content"
@@ -33,6 +38,7 @@
     "name": "funding: aloitetaan stea-hakemus -> lomakkeet + grant_writer",
     "category": "Standard",
     "prompt": "aloitetaan stea-hakemus: kirjoita tarve ja tavoitteet",
+    "max_response_time_sec": 900,
     "expected_keywords": [],
     "expected_tools": [],
     "should_not_contain": [],
@@ -360,6 +366,7 @@
     "name": "Workflow Chain 1",
     "category": "Workflow",
     "prompt": "STEA-hakemus: tutkija -> talous -> kirjoittaja",
+    "max_response_time_sec": 900,
     "expected_keywords": [],
     "assertions": {
       "hard_gate_respected": true

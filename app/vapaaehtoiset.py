@@ -15,6 +15,7 @@ from app.agents_registry import get_agent_def
 
 # Import ORG_PACK
 from app.prompt_packs import ORG_PACK_V1
+from app.contracts_loader import load_contract
 
 # Import Shared Tools
 from app.tools_base import retrieve_docs, LLM, LONG_OUTPUT_CONFIG
@@ -79,6 +80,7 @@ vapaaehtoiset_agent = Agent(
     tools=[retrieve_docs],  # As per registry (Calendar moved to Coordinator)
     instruction=f"""
 {ORG_PACK_V1}
+{load_contract("vapaaehtoiset")}
 
 ## SINUN ROOLISI: VAPAAREHTOISHALLINNAN ASIANTUNTIJA
 

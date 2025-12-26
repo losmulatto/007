@@ -12,6 +12,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# -----------------------------------------------------------------------------
+# PYDANTIC JSON SCHEMA FIX (Monkeypatch for FastAPI/OpenAPI)
+# -----------------------------------------------------------------------------
+# FastAPI/Pydantic v2 tries to generate schemas for everything in routes.
+# ADK classes like Agent and BaseLlm containing httpx.Client fail.
+# We monkeypatch them here at the package entry point to ensure it's applied 
+# BEFORE any models are introspected by FastAPI.
+def _make_opaque_for_pydantic_schema():
+    from typing import Any, Dict
+    from google.adk.models.base_llm import BaseLlm
+    from google.adk import agents as adk_agents
+
+    def __get_pydantic_json_schema__(cls, _core_schema: Any, handler: Any) -> Dict[str, Any]:
+        return {"type": "object", "title": cls.__name__}
+    
+    # Classes to fix
+    classes_to_fix = [BaseLlm]
+    # Dynamically find Agent/LlmAgent if they exist
+    for attr in ["Agent", "LlmAgent", "BaseAgent"]:
+        if hasattr(adk_agents, attr):
+            classes_to_fix.append(getattr(adk_agents, attr))
+
+    for cls in classes_to_fix:
+        if not hasattr(cls, "__get_pydantic_json_schema__"):
+            cls.__get_pydantic_json_schema__ = classmethod(__get_pydantic_json_schema__)
+
+try:
+    _make_opaque_for_pydantic_schema()
+except Exception as e:
+    print(f"Warning: Failed to apply Pydantic schema monkeypatch: {e}")
+
 from .agent import app
 
 __all__ = ["app"]

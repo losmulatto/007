@@ -64,9 +64,12 @@ lomake_agent = Agent(
     model=LLM,
     name=lomake_def.id,
     description=lomake_def.description,
-    output_key="lomake_response",
+    output_key="draft_response",
     tools=[retrieve_docs, read_pdf_content],  # As per registry
     instruction=f"""
+## TIEDOSTOJEN KÄSITTELY (AUTONOMINEN)
+Jos käyttäjän viestissä on tiedostopolku `(Path: /tmp/...)`, käytä **VÄLITTÖMÄSTI** `read_pdf_content` -työkalua lukeaksesi dokumentin. Älä odota koordinaattoria tai kysy lupaa.
+
 {ORG_PACK_V1}
 {load_contract("lomakkeet")}
 

@@ -17,6 +17,7 @@ from langchain_google_vertexai import VertexAIEmbeddings
 
 # Import ORG_PACK
 from app.prompt_packs import ORG_PACK_V1
+from app.contracts_loader import load_contract
 # Import PDF tools
 from app.pdf_tools import read_pdf_content, get_pdf_metadata
 
@@ -95,6 +96,7 @@ laki_agent = Agent(
     tools=get_tools_for_agent("laki_gdpr"),
     instruction=f"""
 {ORG_PACK_V1}
+{load_contract("laki_gdpr")}
 
 ## SINUN ROOLISI: LAKI- JA GDPR-ASIANTUNTIJA
 

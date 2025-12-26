@@ -16,14 +16,17 @@ from typing import AsyncGenerator, Literal
 
 from google.adk.agents import LlmAgent, SequentialAgent, LoopAgent, BaseAgent
 from app.contracts_loader import load_contract
+from app.model_router import attach_model_router
+from app.web_search import search_web, search_news
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event, EventActions
 from google.adk.planners import BuiltInPlanner
-from google.adk.tools import google_search
 from google.adk.tools.agent_tool import AgentTool
 from google.genai import types as genai_types
 from pydantic import BaseModel, Field
+
+DUMMY_THOUGHT_SIGNATURE = b"samha_thought_signature"
 
 
 def _domain_from_url(url: str) -> str:
@@ -107,6 +110,11 @@ def _ensure_sources_from_state(state: dict) -> dict:
     return sources
 
 
+def _attach_router(agent: BaseAgent) -> BaseAgent:
+    attach_model_router(agent)
+    return agent
+
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -116,6 +124,9 @@ import os
 WORKER_MODEL = "gemini-3-flash-preview"
 CRITIC_MODEL = "gemini-3-pro-preview"
 MAX_SEARCH_ITERATIONS = int(os.environ.get("DEEP_SEARCH_ITERATIONS", 3))
+
+from google.genai.types import ThinkingConfig
+PLANNER_THINKING_CONFIG = ThinkingConfig(include_thoughts=True)
 
 
 # =============================================================================
@@ -200,6 +211,72 @@ def collect_research_sources_callback(callback_context: CallbackContext) -> None
     callback_context.state["sources"] = sources
 
 
+def ensure_thought_signatures(callback_context: CallbackContext, llm_request) -> None:
+    for content in llm_request.contents or []:
+        parts = getattr(content, "parts", None) or []
+        for part in parts:
+            if getattr(part, "function_call", None) and not getattr(
+                part, "thought_signature", None
+            ):
+                part.thought_signature = DUMMY_THOUGHT_SIGNATURE
+
+
+def collect_sources_from_tool_callback(tool, args, tool_context, tool_response):
+    tool_name = getattr(tool, "name", None) or getattr(tool, "__name__", None)
+    if tool_name not in ("search_web", "search_news", "search_verified_sources", "google_search"):
+        return None
+
+    text = tool_response
+    if isinstance(text, dict):
+        for key in ("result", "content", "output", "text"):
+            nested = text.get(key)
+            if nested:
+                text = nested
+                break
+    if not text:
+        return None
+
+    sources = tool_context.state.get("sources", {})
+    url_to_short_id = tool_context.state.get("url_to_short_id", {})
+    if not isinstance(sources, dict):
+        sources = {}
+    if not isinstance(url_to_short_id, dict):
+        url_to_short_id = {}
+    id_counter = len(url_to_short_id) + 1
+
+    added = 0
+    # Try to extract sources from the tool output string
+    # Importing it here to avoid circular dependencies if any
+    try:
+        from app.deep_search import _extract_sources_from_search_output
+        extracted = _extract_sources_from_search_output(str(text))
+    except ImportError:
+        extracted = []
+
+    for item in extracted:
+        url = item.get("url")
+        if not url:
+            continue
+        if url not in url_to_short_id:
+            short_id = f"src-{id_counter}"
+            url_to_short_id[url] = short_id
+            sources[short_id] = {
+                "short_id": short_id,
+                "title": item.get("title") or _domain_from_url(url),
+                "url": url,
+                "domain": _domain_from_url(url),
+                "supported_claims": [],
+            }
+            id_counter += 1
+            added += 1
+
+    tool_context.state["url_to_short_id"] = url_to_short_id
+    tool_context.state["sources"] = sources
+    if added:
+        logging.info(f"[source-callback] added {added} sources, total {len(sources)}")
+    return None
+
+
 def citation_replacement_callback(
     callback_context: CallbackContext,
 ) -> genai_types.Content:
@@ -229,6 +306,11 @@ def citation_replacement_callback(
     return genai_types.Content(parts=[genai_types.Part(text=processed_report)])
 
 
+def seed_sources_before_report(callback_context: CallbackContext, llm_request) -> None:
+    """Populate sources before report composition so citations can be generated."""
+    collect_research_sources_callback(callback_context)
+
+
 # =============================================================================
 # CUSTOM AGENT: LOOP CONTROL
 # =============================================================================
@@ -243,15 +325,29 @@ class EscalationChecker(BaseAgent):
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
         evaluation_result = ctx.session.state.get("research_evaluation")
-        if evaluation_result and evaluation_result.get("grade") == "pass":
+        
+        # Determine the grade safely (handle both dict and Pydantic model)
+        grade = None
+        if evaluation_result:
+            if isinstance(evaluation_result, dict):
+                grade = evaluation_result.get("grade")
+            elif hasattr(evaluation_result, "grade"):
+                grade = evaluation_result.grade
+                
+        logging.info(f"[{self.name}] Evaluation check: grade={grade}")
+        print(f"[{self.name}] Evaluation check: grade={grade}")
+        
+        if grade == "pass":
             logging.info(
                 f"[{self.name}] Research evaluation passed. Escalating to stop loop."
             )
             yield Event(author=self.name, actions=EventActions(escalate=True))
         else:
+            reason = "failed" if evaluation_result else "not found"
             logging.info(
-                f"[{self.name}] Research evaluation failed or not found. Loop will continue."
+                f"[{self.name}] Research evaluation {reason}. Loop will continue."
             )
+            print(f"[{self.name}] Research evaluation {reason}. Loop will continue.")
             yield Event(author=self.name)
 
 
@@ -265,27 +361,29 @@ plan_generator = LlmAgent(
     description="Generates or refines a 5-line action-oriented research plan.",
     instruction=f"""
 You are a research strategist. Your job is to create a high-level RESEARCH PLAN, not a summary.
+OUTPUT LANGUAGE: FINNISH.
+
 If there is already a RESEARCH PLAN in the session state, improve upon it based on the user feedback.
 
 RESEARCH PLAN (SO FAR):
 {{{{ research_plan? }}}}
 
-**TASK CLASSIFICATION**
-Each bullet point should start with a task type prefix:
-- **`[RESEARCH]`**: For information gathering, investigation, analysis (requires search)
-- **`[DELIVERABLE]`**: For synthesizing information, creating outputs (no search needed)
+**TEHTÄVIEN LUOKITTELU**
+Jokaisen kohdan tulee alkaa tehtävätyypillä:
+- **`[RESEARCH]`**: Tiedonkeruu, tutkimus, analyysi (vaatii hakua)
+- **`[DELIVERABLE]`**: Tiedon koonti, tuotokset (ei vaadi hakua)
 
-**OUTPUT FORMAT**
-Your output MUST be a bulleted list of 5 action-oriented research goals:
-- 5 goals classified as `[RESEARCH]`
-- Followed by any implied deliverables
+**Vastausmuoto**
+Tuota 5-kohtainen tutkimussuunnitelma:
+- 5 tavoitetta luokiteltuna `[RESEARCH]`
+- Mahdolliset välituotokset (`[DELIVERABLE]`)
 
-**RULES**
-- Your goal is to create a generic, high-quality plan WITHOUT searching
-- Only use `google_search` if a topic is ambiguous and you cannot create a plan without it
+**SÄÄNNÖT**
+- Tavoitteesi on luoda laadukas suunnitelma ILMAN hakua
+- Käytä selkeää suomen kieltä
 - Current date: {datetime.datetime.now().strftime("%Y-%m-%d")}
 """,
-    tools=[google_search],
+    tools=[search_web, search_news],
     output_key="research_plan",
 )
 
@@ -326,21 +424,21 @@ section_researcher = LlmAgent(
     model=WORKER_MODEL,
     name="section_researcher",
     description="Executes the research plan using web search and documents findings.",
-    planner=BuiltInPlanner(
-        thinking_config=genai_types.ThinkingConfig(include_thoughts=True)
-    ),
+    planner=BuiltInPlanner(thinking_config=PLANNER_THINKING_CONFIG) if os.getenv("SAMHA_LLM_PROVIDER", "google") == "google" else None,
+    before_model_callback=ensure_thought_signatures,
     instruction=f"""
 You are a research specialist executing a detailed research plan.
+OUTPUT LANGUAGE: FINNISH.
 
 RESEARCH PLAN:
 {{{{ research_plan }}}}
 
 **YOUR DIRECTIVE**
-Execute ALL `[RESEARCH]` goals systematically using `google_search`.
+Execute ALL `[RESEARCH]` goals systematically using `search_web`.
 
 **PHASE 1: RESEARCH**
 For each `[RESEARCH]` goal:
-1. Use `google_search` tool to find relevant information
+1. Use `search_web` tool to find relevant information
 2. Synthesize findings into a concise summary
 3. Include key facts, data, and quotes
 4. Note sources for later citation
@@ -354,9 +452,10 @@ After ALL research is complete, execute `[DELIVERABLE]` goals using ONLY gathere
 - Note source URLs
 - Current date: {datetime.datetime.now().strftime("%Y-%m-%d")}
 """,
-    tools=[google_search],
+    tools=[search_web, search_news],
     output_key="section_research_findings",
     after_agent_callback=collect_research_sources_callback,
+    after_tool_callback=collect_sources_from_tool_callback,
 )
 
 
@@ -393,21 +492,22 @@ enhanced_search_executor = LlmAgent(
     model=WORKER_MODEL,
     name="enhanced_search_executor",
     description="Executes follow-up searches and integrates new findings.",
-    planner=BuiltInPlanner(
-        thinking_config=genai_types.ThinkingConfig(include_thoughts=True)
-    ),
+    planner=BuiltInPlanner(thinking_config=PLANNER_THINKING_CONFIG) if os.getenv("SAMHA_LLM_PROVIDER", "google") == "google" else None,
+    before_model_callback=ensure_thought_signatures,
     instruction="""
 You are a specialist researcher executing a refinement pass.
+OUTPUT LANGUAGE: FINNISH.
 You have been activated because the previous research was graded as 'fail'.
 
 1. Review the 'research_evaluation' state key to understand the feedback and required fixes.
-2. Execute EVERY query listed in 'follow_up_queries' using the 'google_search' tool.
+2. Execute EVERY query listed in 'follow_up_queries' using the 'search_web' tool.
 3. Synthesize the new findings and COMBINE them with existing information in 'section_research_findings'.
 4. Your output MUST be the new, complete, and improved set of research findings.
 """,
-    tools=[google_search],
+    tools=[search_web, search_news],
     output_key="section_research_findings",
     after_agent_callback=collect_research_sources_callback,
+    after_tool_callback=collect_sources_from_tool_callback,
 )
 
 
@@ -416,8 +516,10 @@ report_composer = LlmAgent(
     name="report_composer_with_citations",
     include_contents="none",
     description="Transforms research data and a markdown outline into a final, cited report.",
+    before_model_callback=seed_sources_before_report,
     instruction="""
 Transform the provided data into a polished, professional, and meticulously cited research report.
+OUTPUT LANGUAGE: FINNISH.
 
 ---
 ### INPUT DATA
@@ -450,7 +552,7 @@ Do not include a "References" or "Sources" section; all citations must be in-lin
 def get_research_pipeline():
     # Instantiate fresh agents for each pipeline to avoid parent assignment conflicts
     
-    local_section_planner = LlmAgent(
+    local_section_planner = _attach_router(LlmAgent(
         model=WORKER_MODEL,
         name="section_planner",
         description="Creates a detailed markdown outline for a research report based on the approved plan.",
@@ -480,15 +582,14 @@ Create a markdown outline for the final report using the structure below:
 - DO NOT perform any searches
 """,
         output_key="report_sections",
-    )
+    ))
 
-    local_section_researcher = LlmAgent(
+    local_section_researcher = _attach_router(LlmAgent(
         model=WORKER_MODEL,
         name="section_researcher",
         description="Executes the research plan using web search and documents findings.",
-        planner=BuiltInPlanner(
-            thinking_config=genai_types.ThinkingConfig(include_thoughts=True)
-        ),
+        planner=BuiltInPlanner(thinking_config=PLANNER_THINKING_CONFIG) if os.getenv("SAMHA_LLM_PROVIDER", "google") == "google" else None,
+        before_model_callback=ensure_thought_signatures,
         instruction=f"""
 You are a research specialist executing a detailed research plan.
 OUTPUT LANGUAGE: FINNISH.
@@ -497,11 +598,11 @@ RESEARCH PLAN:
 {{{{ research_plan }}}}
 
 **YOUR DIRECTIVE**
-Execute ALL `[RESEARCH]` goals systematically using `google_search`.
+Execute ALL `[RESEARCH]` goals systematically using `search_web`.
 
 **PHASE 1: RESEARCH**
 For each `[RESEARCH]` goal:
-1. Use `google_search` tool to find relevant information
+1. Use `search_web` tool to find relevant information
 2. Synthesize findings into a concise summary
 3. Include key facts, data, and quotes
 4. Note sources for later citation
@@ -515,12 +616,13 @@ After ALL research is complete, execute `[DELIVERABLE]` goals using ONLY gathere
 - Note source URLs
 - Current date: {datetime.datetime.now().strftime("%Y-%m-%d")}
 """,
-        tools=[google_search],
+        tools=[search_web, search_news],
         output_key="section_research_findings",
         after_agent_callback=collect_research_sources_callback,
-    )
+        after_tool_callback=collect_sources_from_tool_callback,
+    ))
 
-    local_research_evaluator = LlmAgent(
+    local_research_evaluator = _attach_router(LlmAgent(
         model=CRITIC_MODEL,
         name="research_evaluator",
         description="Critically evaluates research and generates follow-up queries.",
@@ -547,35 +649,36 @@ Your response must be a single, raw JSON object validating against the 'Feedback
         disallow_transfer_to_parent=True,
         disallow_transfer_to_peers=True,
         output_key="research_evaluation",
-    )
+    ))
 
-    local_search_executor = LlmAgent(
+    local_search_executor = _attach_router(LlmAgent(
         model=WORKER_MODEL,
         name="enhanced_search_executor",
         description="Executes follow-up searches and integrates new findings.",
-        planner=BuiltInPlanner(
-            thinking_config=genai_types.ThinkingConfig(include_thoughts=True)
-        ),
+        planner=BuiltInPlanner(thinking_config=PLANNER_THINKING_CONFIG) if os.getenv("SAMHA_LLM_PROVIDER", "google") == "google" else None,
+        before_model_callback=ensure_thought_signatures,
         instruction="""
 You are a specialist researcher executing a refinement pass.
 OUTPUT LANGUAGE: FINNISH.
 You have been activated because the previous research was graded as 'fail'.
 
 1. Review the 'research_evaluation' state key to understand the feedback and required fixes.
-2. Execute EVERY query listed in 'follow_up_queries' using the 'google_search' tool.
+2. Execute EVERY query listed in 'follow_up_queries' using the 'search_web' tool.
 3. Synthesize the new findings and COMBINE them with existing information in 'section_research_findings'.
 4. Your output MUST be the new, complete, and improved set of research findings.
 """,
-        tools=[google_search],
+        tools=[search_web, search_news],
         output_key="section_research_findings",
         after_agent_callback=collect_research_sources_callback,
-    )
+        after_tool_callback=collect_sources_from_tool_callback,
+    ))
 
-    local_report_composer = LlmAgent(
+    local_report_composer = _attach_router(LlmAgent(
         model=CRITIC_MODEL,
         name="report_composer_with_citations",
         include_contents="none",
         description="Transforms research data and a markdown outline into a final, cited report.",
+        before_model_callback=seed_sources_before_report,
         instruction="""
 Transform the provided data into a polished, professional, and meticulously cited research report.
 OUTPUT LANGUAGE: FINNISH.
@@ -601,7 +704,7 @@ Do not include a "References" or "Sources" section; all citations must be in-lin
 """,
         output_key="final_cited_report",
         after_agent_callback=citation_replacement_callback,
-    )
+    ))
 
     return SequentialAgent(
         name="research_pipeline",
@@ -623,11 +726,13 @@ Do not include a "References" or "Sources" section; all citations must be in-lin
     )
 
 
-syvahaku_agent = LlmAgent(
-    name="syvahaku",
-    model=WORKER_MODEL,
-    description="Syvällinen tutkimusagentti. Luo monivaiheisen tutkimussuunnitelman, kerää tietoa iteratiivisesti, arvioi laatua, ja tuottaa kattavan raportin lähdeviittein.",
-    instruction=f"""
+def get_syvahaku_agent(suffix: str = "") -> LlmAgent:
+    """Returns a fresh instance of the syvahaku agent."""
+    return _attach_router(LlmAgent(
+        name=f"syvahaku{suffix}",
+        model=WORKER_MODEL,
+        description="Syvällinen tutkimusagentti. Luo monivaiheisen tutkimussuunnitelman, kerää tietoa iteratiivisesti, arvioi laatua, ja tuottaa kattavan raportin lähdeviittein.",
+        instruction=f"""
 ## SINUN ROOLISI: SYVÄHAKU (DEEP RESEARCH)
 {load_contract("syvahaku")}
 
@@ -661,10 +766,13 @@ Käytä syvähakua kun:
 
 Current date: {datetime.datetime.now().strftime("%Y-%m-%d")}
 """,
-    sub_agents=[get_research_pipeline()],
-    tools=[AgentTool(plan_generator)],
-    output_key="research_plan",
-)
+        sub_agents=[get_research_pipeline()],
+        tools=[AgentTool(plan_generator)],
+        output_key="research_plan",
+    ))
+
+# Default instance with parent-clearing hack
+syvahaku_agent = get_syvahaku_agent()
 
 # Alias for easy import
 root_agent = syvahaku_agent

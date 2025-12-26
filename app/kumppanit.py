@@ -12,6 +12,7 @@ from app.agents_registry import get_agent_def
 
 # Import ORG_PACK
 from app.prompt_packs import ORG_PACK_V1
+from app.contracts_loader import load_contract
 from app.pdf_tools import read_pdf_content, get_pdf_metadata
 
 # Import Advanced Tools
@@ -61,6 +62,7 @@ kumppanit_agent = Agent(
     tools=[retrieve_docs],  # Only retrieve for kumppanit per matrix
     instruction=f"""
 {ORG_PACK_V1}
+{load_contract("kumppanit")}
 
 ## SINUN ROOLISI: SIDOSRYHMÄ- JA KULTTUURIASIANTUNTIJA
 

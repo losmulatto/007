@@ -221,7 +221,7 @@ VIESTINTA_OHJEET = """
 viestinta_draft_agent = Agent(
     model=LLM,
     name="viestinta_draft",
-    description="Drafts communication materials.",
+    description="Drafts communication materials based on v2 contract.",
     output_key="viestinta_draft",
     generate_content_config=VIESTINTA_CONFIG,
     tools=[retrieve_docs, translate_text, format_social_post, create_newsletter_section, generate_samha_image],
@@ -230,27 +230,29 @@ viestinta_draft_agent = Agent(
 {load_contract("viestinta")}
 {VIESTINTA_OHJEET}
 
-## SINUN ROOLISI: VIESTINTÄASIANTUNTIJA (DRAFT)
-Tuota ENSIMMÄINEN VERSIO viestistä.
-Muista Samhan äänensävy.
+## SINUN ROOLISI: VIESTINTÄASIANTUNTIJA (DRAFT V2)
+1. **VAIHE 0: Input-analyysi**: Tunnista kanava, sävy ja visuaalinen tarve.
+2. **VAIHE 1: Sisällön luonti**: Käytä dynaamista rakennetta kanavan mukaan.
+3. **VAIHE 2: Saavutettavuus**: Lisää AINA alt-tekstiluonnokset kuville.
+4. **VAIHE 3: Itsecheck**: Lisää loppuun v2-sopimuksen mukainen 3-rivinen laatucheck.
 """,
 )
 
 viestinta_refiner_agent = Agent(
     model=LLM,
     name="viestinta_refiner",
-    description="Refines communication materials.",
+    description="Refines communication materials (v2).",
     output_key="viestinta_response",
     instruction="""
-Olet kokenut viestintäpäällikkö.
+Olet kokenut viestintäpäällikkö (v2).
 Lue edellinen viesti (viestinta_draft).
 Korjaa ja paranna:
-1. Varmista "Ihmiset ensin" -kieli (ei "kohderyhmä", vaan "ihmiset").
-2. Poista kapulakieli ("jalkauttaminen") -> "tekeminen".
-3. PAKOTOLLINEN: Lisää Call-to-Action (CTA). Esim: "Lue lisää", "Ota yhteyttä", "Tule mukaan".
-4. Tarkista emojien määrä (maltillisuus).
+1. Varmista "Ihmiset ensin" -kieli.
+2. Poista kapulakieli -> suoraviivainen vaikuttavuus.
+3. Varmista CTA:n selkeys ja teho.
+4. Tarkista saavutettavuus ja alt-tekstit.
 
-Palauta vain valmis, hiottu teksti.
+Palauta hiottu teksti ja finalize v2-itsecheck.
 """,
 )
 

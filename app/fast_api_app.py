@@ -1,16 +1,43 @@
-# Copyright 2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
 # limitations under the License.
+
+# -----------------------------------------------------------------------------
+# PYDANTIC JSON SCHEMA FIX (Monkeypatch for FastAPI/OpenAPI)
+# Must be at the VERY TOP to affect all imports
+# -----------------------------------------------------------------------------
+def _make_opaque_for_pydantic_schema():
+    try:
+        from typing import Any, Dict
+        import pydantic
+        import httpx
+        from pydantic_core import core_schema
+
+        def _get_core_schema(cls, _source, _handler):
+            return core_schema.any_schema()
+        
+        for httpx_cls in [httpx.Client, httpx.AsyncClient]:
+            if not hasattr(httpx_cls, "__get_pydantic_core_schema__"):
+                httpx_cls.__get_pydantic_core_schema__ = classmethod(_get_core_schema)
+
+        # Fix ADK classes
+        try:
+            from google.adk.models.base_llm import BaseLlm
+            from google.adk import agents as adk_agents
+            def __get_pydantic_json_schema__(cls, _core_schema: Any, handler: Any) -> Dict[str, Any]:
+                return {"type": "object", "title": cls.__name__}
+            
+            classes_to_fix = [BaseLlm]
+            for attr in ["Agent", "LlmAgent", "BaseAgent"]:
+                if hasattr(adk_agents, attr):
+                    classes_to_fix.append(getattr(adk_agents, attr))
+            for cls in classes_to_fix:
+                if not hasattr(cls, "__get_pydantic_json_schema__"):
+                    cls.__get_pydantic_json_schema__ = classmethod(__get_pydantic_json_schema__)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+_make_opaque_for_pydantic_schema()
 
 import os
 import re
@@ -26,6 +53,10 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from google.adk.cli.fast_api import get_fast_api_app
 from google.cloud import logging as google_cloud_logging
 
+from app.env import load_env
+
+load_env()
+
 from app.app_utils.telemetry import setup_telemetry
 from app.app_utils.typing import Feedback
 
@@ -34,7 +65,7 @@ _, project_id = google.auth.default()
 logging_client = google_cloud_logging.Client()
 logger = logging_client.logger(__name__)
 allow_origins = (
-    os.getenv("ALLOW_ORIGINS", "").split(",") if os.getenv("ALLOW_ORIGINS") else None
+    os.getenv("ALLOW_ORIGINS", "").split(",") if os.getenv("ALLOW_ORIGINS") else ["*"]
 )
 
 # Artifact bucket for ADK (created by Terraform, passed via env var)
@@ -75,6 +106,32 @@ def _read_text_preview(file_path: Path) -> tuple[str, bool]:
     return content[:UPLOAD_PREVIEW_CHARS], truncated
 
 
+def _extract_pdf_text(file_path: Path) -> str:
+    """Extract text from PDF using pymupdf."""
+    try:
+        import pymupdf  # pip install pymupdf
+        doc = pymupdf.open(str(file_path))
+        text_parts = []
+        for page in doc:
+            text_parts.append(page.get_text())
+        doc.close()
+        return "\n".join(text_parts)
+    except ImportError:
+        # Fallback: try pdfplumber
+        try:
+            import pdfplumber
+            with pdfplumber.open(str(file_path)) as pdf:
+                text_parts = []
+                for page in pdf.pages:
+                    text_parts.append(page.extract_text() or "")
+                return "\n".join(text_parts)
+        except ImportError:
+            return ""
+    except Exception as e:
+        print(f"PDF extraction error: {e}")
+        return ""
+
+
 def _extract_preview(file_path: Path, extension: str) -> tuple[Optional[str], bool]:
     try:
         if extension == ".txt":
@@ -84,7 +141,15 @@ def _extract_preview(file_path: Path, extension: str) -> tuple[Optional[str], bo
             if len(text) > UPLOAD_PREVIEW_CHARS:
                 return text[:UPLOAD_PREVIEW_CHARS], True
             return text, False
-    except Exception:
+        if extension == ".pdf":
+            text = _extract_pdf_text(file_path)
+            if text:
+                if len(text) > UPLOAD_PREVIEW_CHARS:
+                    return text[:UPLOAD_PREVIEW_CHARS], True
+                return text, False
+            return None, False
+    except Exception as e:
+        print(f"Preview extraction error: {e}")
         return None, False
     return None, False
 
@@ -120,8 +185,54 @@ app: FastAPI = get_fast_api_app(
     session_service_uri=session_service_uri,
     otel_to_cloud=True,
 )
+
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.title = "samha-infra"
 app.description = "API for interacting with the Agent samha-infra"
+
+# -----------------------------------------------------------------------------
+# OPENAPI SAFEGUARD
+# -----------------------------------------------------------------------------
+from fastapi.openapi.utils import get_openapi
+import traceback
+
+def custom_openapi():
+    """Custom OpenAPI generator that catches schema generation errors."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    try:
+        openapi_schema = get_openapi(
+            title=app.title,
+            version="1.0.0",
+            description=app.description,
+            routes=app.routes,
+        )
+        # Prune problematic fields from the generated schema if needed
+        # (For now, just ensuring it doesn't crash the whole app)
+    except Exception as e:
+        print(f"CRITICAL: OpenAPI schema generation failed: {e}")
+        # Return a minimal valid OpenAPI schema so the UI doesn't 500
+        openapi_schema = {
+            "openapi": "3.0.0",
+            "info": {
+                "title": app.title,
+                "version": "1.0.0",
+                "description": "API (OpenAPI generation failed, but service is running)"
+            },
+            "paths": {}
+        }
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
 
 
 @app.post("/upload")
@@ -183,6 +294,118 @@ async def upload_file(
         "preview_text": preview_text,
         "preview_truncated": preview_truncated,
     }
+
+
+# =============================================================================
+# ARCHIVE API ENDPOINTS
+# =============================================================================
+
+from app.archive import get_archive_service, ArchiveSearchQuery, ArchiveEntry
+from typing import List
+
+@app.get("/archive")
+async def list_archive(
+    document_type: Optional[str] = None,
+    program: Optional[str] = None,
+    project: Optional[str] = None,
+    query: Optional[str] = None,
+    tags: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict:
+    """List archived documents with optional filters."""
+    archive = get_archive_service()
+    
+    search_query = ArchiveSearchQuery(
+        document_type=document_type if document_type else None,
+        program=program if program else None,
+        project=project if project else None,
+        query=query if query else None,
+        tags=[t.strip() for t in tags.split(",") if t.strip()] if tags else None,
+        latest_only=True,
+        limit=limit,
+        offset=offset,
+    )
+    
+    result = archive.search(search_query)
+    
+    return {
+        "entries": [
+            {
+                "id": e.id,
+                "title": e.title,
+                "summary": e.summary,
+                "document_type": e.document_type,
+                "program": e.program,
+                "project": e.project,
+                "tags": e.tags,
+                "status": e.status,
+                "agent_name": e.agent_name,
+                "created_at": e.created_at.isoformat(),
+                "word_count": e.word_count,
+            }
+            for e in result.entries
+        ],
+        "total_count": result.total_count,
+    }
+
+
+@app.get("/archive/stats")
+async def get_archive_stats() -> dict:
+    """Get archive statistics."""
+    archive = get_archive_service()
+    return archive.get_stats()
+
+
+@app.get("/archive/folders")
+async def list_archive_folders() -> dict:
+    """List folder structure (grouped by type, program, project)."""
+    archive = get_archive_service()
+    return archive.list_folders()
+
+
+@app.get("/archive/{entry_id}")
+async def get_archive_entry(entry_id: str) -> dict:
+    """Get a single archive entry by ID."""
+    archive = get_archive_service()
+    entry = archive.get(entry_id)
+    
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    
+    return {
+        "id": entry.id,
+        "title": entry.title,
+        "summary": entry.summary,
+        "content": entry.content,
+        "document_type": entry.document_type,
+        "program": entry.program,
+        "project": entry.project,
+        "tags": entry.tags,
+        "audience": entry.audience,
+        "language": entry.language,
+        "channel": entry.channel,
+        "status": entry.status,
+        "qa_decision": entry.qa_decision,
+        "agent_name": entry.agent_name,
+        "prompt_packs": entry.prompt_packs,
+        "version": entry.version,
+        "created_at": entry.created_at.isoformat(),
+        "updated_at": entry.updated_at.isoformat(),
+        "word_count": entry.word_count,
+    }
+
+
+@app.delete("/archive/{entry_id}")
+async def delete_archive_entry(entry_id: str) -> dict:
+    """Delete an archive entry permanently."""
+    archive = get_archive_service()
+    success = archive.delete(entry_id)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    
+    return {"status": "deleted", "id": entry_id}
 
 
 @app.post("/feedback")

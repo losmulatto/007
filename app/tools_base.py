@@ -152,3 +152,13 @@ def python_interpreter(expression: str) -> str:
         return f"Tulos: {result}"
     except Exception as e:
         return f"Python error: {e}"
+
+def transfer_to_agent(agent_name: str) -> str:
+    """
+    Delegoi tehtävä toiselle asiantuntijalle.
+    Käytä tätä, kun haluat siirtää keskustelun tietyn alueen asiantuntijalle.
+    
+    Args:
+        agent_name: Kohdeagentin nimi (esim. 'tutkija', 'sote', 'proposal_reviewer_specialist').
+    """
+    return f"SIIRTO: Tehtävä siirretty asiantuntijalle '{agent_name}'."

@@ -14,8 +14,8 @@ from typing import Tuple, List
 # Email pattern
 EMAIL_PATTERN = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
 
-# Phone pattern (Finnish style)
-PHONE_PATTERN = r'\b(\+358|0[1-9])\s*(\d\s*){7,10}\b'
+# Phone pattern (Finnish style, supports +358 with spaces/hyphens)
+PHONE_PATTERN = r'(?:\+358|0[1-9])(?:[\s-]*\d){7,10}'
 
 # Personal ID (HETU)
 HETU_PATTERN = r'\b\d{6}[-+A]\d{3}[0-9A-Z]\b'

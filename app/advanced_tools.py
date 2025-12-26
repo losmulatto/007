@@ -57,18 +57,8 @@ async def process_meeting_transcript(transcript_text: str) -> str:
 # 2. DATA VISUALIZER
 # =============================================================================
 
-def generate_data_chart(data_json: str, chart_type: str = "bar", title: str = "Samha Raportti") -> str:
-    """
-    Luo graafisen kaavion annetusta JSON-datasta.
-    
-    Args:
-        data_json: JSON-string, joka sisältää labelit ja arvot (esim. '{"label": ["A", "B"], "value": [10, 20]}').
-        chart_type: 'bar', 'pie' tai 'line'.
-        title: Kaavion otsikko.
-        
-    Returns:
-        str: Tiedostopolku luotuun kaavioon.
-    """
+def _generate_data_chart_impl(data_json: str, chart_type: str = "bar", title: str = "Samha Raportti") -> str:
+    """Internal impl."""
     try:
         data = json.loads(data_json)
         df = pd.DataFrame(data)
@@ -99,6 +89,15 @@ def generate_data_chart(data_json: str, chart_type: str = "bar", title: str = "S
         
     except Exception as e:
         return f"❌ Virhe kaavion luonnissa: {str(e)}"
+
+def generate_data_chart(data_json: str) -> str:
+    """
+    Luo graafisen kaavion annetusta JSON-datasta (pylväskaavio).
+    
+    Args:
+        data_json: JSON-string, joka sisältää labelit ja arvot (esim. '{"label": ["A", "B"], "value": [10, 20]}').
+    """
+    return _generate_data_chart_impl(data_json)
 
 # =============================================================================
 # 3. CALENDAR MOCK

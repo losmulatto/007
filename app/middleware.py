@@ -49,3 +49,39 @@ async def pii_sanitize_middleware(context=None, **kwargs):
 
     except Exception as e:
         print(f"Callback error (pii_middleware): {e}")
+
+from app.quality_lint import lint_quality
+
+async def quality_lint_middleware(context=None, **kwargs):
+    """
+    Middleware: Runs deterministic quality checks on 'draft_response'.
+    If checks fail, injects specific failure notes into the QA agent's instructions.
+    """
+    ctx = context or kwargs.get('callback_context')
+    if ctx is None: return
+
+    try:
+        session = getattr(ctx, 'session', None)
+        if not session:
+            return
+
+        state = session.state
+        draft = state.get("draft_response", "")
+        
+        if draft:
+            result = lint_quality(draft)
+            state["quality_lint"] = result
+            
+            if not result["passed"]:
+                state["quality_lint_failed"] = True
+                
+                # Inject failure notice into instruction
+                if hasattr(ctx, 'instruction') and ctx.instruction:
+                    issues_str = "\n- ".join(result["issues"])
+                    ctx.instruction += (
+                        f"\n\n[SYSTEM ALERT]: Quality Lint Failed!\n"
+                        f"The following issues were found in the draft:\n- {issues_str}\n"
+                        f"You MUST output NEEDS_REVISION and list these fixes."
+                    )
+    except Exception as e:
+        print(f"Callback error (quality_lint_middleware): {e}")

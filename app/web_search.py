@@ -513,35 +513,13 @@ def get_web_search_service() -> WebSearchService:
     return _web_search_service
 
 
-def search_web(
+def _search_web_impl(
     query: str,
     mode: str = "general",
     max_results: int = 10,
     time_range: str = "",
 ) -> str:
-    """
-    Hae tietoa verkosta. Käytä tätä kun tarvitset:
-    - Ajankohtaisia uutisia ja tapahtumia
-    - Virallisia ohjeita (Stea, THL, OPH)
-    - Ulkoista tietoa joka ei ole Samhan tietokannassa
-    
-    Args:
-        query: Hakusana suomeksi
-        mode: Hakumoodi
-            - "verified": Vain luotetut lähteet (stea.fi, thl.fi, oph.fi)
-            - "general": Laaja haku kaikista lähteistä
-            - "news": Uutiset ja ajankohtaiset
-        max_results: Tulosten maksimimäärä (1-10)
-        time_range: Aikarajaus
-            - "": Ei rajausta
-            - "d7": Viimeiset 7 päivää
-            - "m1": Viimeinen kuukausi
-            - "m3": Viimeiset 3 kuukautta
-            - "y1": Viimeinen vuosi
-    
-    Returns:
-        Hakutulokset muotoiltuna tekstinä
-    """
+    """Internal impl."""
     service = get_web_search_service()
     
     # Map time_range to Google format
@@ -576,49 +554,36 @@ def search_web(
     return output
 
 
-def search_verified_sources(query: str, max_results: int = 10) -> str:
+def search_web(query: str) -> str:
+    """
+    Hae tietoa verkosta (yleinen haku).
+    """
+    return _search_web_impl(query, mode="general")
+
+
+def search_news(query: str) -> str:
+    """
+    Hae uutisia (viimeinen kuukausi).
+    """
+    return _search_web_impl(query, mode="news", time_range="m1")
+
+
+def search_verified_sources(query: str) -> str:
     """
     Hae VAIN luotetuista lähteistä (stea.fi, thl.fi, oph.fi, finlex.fi).
     Käytä tätä kun tarvitset virallisia ohjeita tai säädöksiä.
-    
-    Args:
-        query: Hakusana suomeksi
-        max_results: Tulosten määrä
-    
-    Returns:
-        Hakutulokset vain luotetuista lähteistä
     """
-    return search_web(query, mode="verified", max_results=max_results)
+    return _search_web_impl(query, mode="verified")
 
 
-def search_news(query: str, time_range: str = "m1", max_results: int = 10) -> str:
-    """
-    Hae ajankohtaisia uutisia ja artikkeleita.
-    Käytä tätä kun haluat kirjoittaa ajankohtaisista aiheista.
-    
-    Args:
-        query: Hakusana suomeksi
-        time_range: Aikarajaus (d7=viikko, m1=kuukausi, m3=3kk, y1=vuosi)
-        max_results: Tulosten määrä
-    
-    Returns:
-        Uutiset ja ajankohtaiset
-    """
-    return search_web(query, mode="news", max_results=max_results, time_range=time_range)
-
-
-def search_legal_sources(query: str, max_results: int = 5) -> str:
+def search_legal_sources(query: str) -> str:
     """
     Hae VAIN juridisista lähteistä (Finlex, Tietosuoja, Ministeriöt).
-    
-    Args:
-        query: Hakusana (esim. 'tietosuoja-asetus henkilötiedot')
-        max_results: Tulosten määrä
     """
     # Construct a site-restricted query manually to bypass mode logic
     site_query = " OR ".join([f"site:{d}" for d in LEGAL_DOMAINS])
     full_query = f"{query} ({site_query})"
-    return search_web(full_query, mode="general", max_results=max_results)
+    return _search_web_impl(full_query, mode="general")
 
 
 # =============================================================================

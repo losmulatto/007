@@ -29,6 +29,10 @@ KOORDINAATTORI
 import os
 from app.contracts_loader import load_contract
 
+from app.env import load_env
+
+load_env()
+
 import google
 import vertexai
 from google.adk.agents import Agent, SequentialAgent
@@ -36,16 +40,25 @@ from google.adk.apps.app import App
 from google.genai import types as genai_types
 from langchain_google_vertexai import VertexAIEmbeddings
 
-# LLM configuration for long-form outputs
-LONG_OUTPUT_CONFIG = genai_types.GenerateContentConfig(
-    temperature=0.7,
-    max_output_tokens=32768,  # 32k tokens for long articles/plans
+# =============================================================================
+# Gemini 3 Configuration - No Temperature!
+# =============================================================================
+# Per Gemini 3 best practices: keep temperature at default (1.0)
+# Control quality via thinking_level instead
+
+from app.gemini3_config import (
+    LONG_OUTPUT_CONFIG,
+    CRITIC_CONFIG,
+    MODEL_FLASH,
+    MODEL_PRO,
+    USE_PRO,
+    pick_model,
+    gen_config,
+    PROFILE_WRITER,
+    PROFILE_CRITIC,
 )
 
-CRITIC_CONFIG = genai_types.GenerateContentConfig(
-    temperature=0.2,
-    max_output_tokens=8192,
-)
+
 
 from app.retrievers import get_compressor, get_retriever
 from app.templates import format_docs
@@ -63,7 +76,7 @@ from app.prompt_packs import (
     FUNDING_TYPES_PACK_V1,
 )
 from app.deep_search import syvahaku_agent
-from app.hankesuunnittelija import grant_writer_agent
+from app.hankesuunnittelija import grant_writer_agent, get_proposal_reviewer
 from app.ammattilaiset import hallinto_agent, hr_agent, talous_agent, get_specialist_agent
 from app.viestinta import viestinta_agent
 from app.lomakkeet import lomake_agent
@@ -76,15 +89,17 @@ methods_expert = get_specialist_agent("koulutus", suffix="_global")
 writer_expert = get_specialist_agent("kirjoittaja", suffix="_global")
 # ... other specialists could be added here ...
 
-# Import Agent Registry
-from app.agents_registry import SAMHA_AGENT_REGISTRY, get_agent_def, DOMAIN_EXPERT, RESEARCH, OUTPUT
+from app.agents_registry import SAMHA_AGENT_REGISTRY, get_agent_def, LEADERSHIP, DOMAIN_EXPERT, RESEARCH, OUTPUT, QA_POLICY
 from app.tool_ids import ToolId
+from google.adk import agents as adk_agents
+from typing import Any, Dict
 
 # Import QA Policy
 from app.qa_policy import qa_policy_agent
 
 
 from app.tools_registry import TOOL_MAP
+from app.model_router import attach_model_router
 
 def get_tools_for_agent(agent_id: str):
     if agent_id not in SAMHA_AGENT_REGISTRY:
@@ -96,12 +111,14 @@ EMBEDDING_MODEL = "text-embedding-005"
 LLM_LOCATION = "global"
 LOCATION = "us-central1"
 LLM = "gemini-3-flash-preview"
-LLM_PRO = "gemini-3-pro-preview" 
+LLM_PRO = "gemini-3-flash-preview"
+
+
 
 credentials, project_id = google.auth.default()
 os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
 os.environ["GOOGLE_CLOUD_LOCATION"] = LLM_LOCATION
-os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
+os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "True")
 
 vertexai.init(project=project_id, location=LOCATION)
 from app.tools_base import retriever, compressor, embeddings
@@ -195,11 +212,12 @@ async def hard_gate_callback(context=None, **kwargs):
 
             session.state["hard_gate"] = {
                 "rag_required": bool(getattr(signals, 'rag_required', False)),
+                "web_required": bool(getattr(signals, 'web_required', False)), # Added web_required
                 "signals": active_signals,
                 "raw": last_msg[:400]
             }
-            if signals.rag_required:
-                print(f"HARD GATE STATE SET: rag_required=True (Signals: {active_signals})")
+            if signals.rag_required or signals.web_required:
+                print(f"HARD GATE STATE SET: rag={session.state['hard_gate']['rag_required']} web={session.state['hard_gate']['web_required']}")
             
             # Inject State into Instruction (Phase 1.9 Fix)
             if hasattr(ctx, 'instruction'):
@@ -209,6 +227,101 @@ async def hard_gate_callback(context=None, **kwargs):
     except Exception as e:
         print(f"Callback error (hard_gate): {e}")
 
+# --- PROGRAMMATIC DELEGATION CALLBACK ---
+# Map of agent IDs that can be targeted directly
+# Includes both backend names and frontend aliases
+TARGETABLE_AGENTS = {
+    # Core agents
+    "tutkija", "sote", "yhdenvertaisuus", "koulutus", "kirjoittaja",
+    "arkisto", "syvahaku", "grant_writer", "hallinto", "hr", "talous",
+    "viestinta", "lomakkeet", "vapaaehtoiset", "laki_gdpr", "kumppanit",
+    "qa_policy", "qa_quality", "methods_expert", "writer_expert",
+    # Frontend ID aliases
+    "proposal_reviewer", 
+    "lomakkeet_expert",
+    "raportti_arvioija",
+    # Special agents
+    "kriitikko",
+}
+
+async def forced_delegation_callback(callback_context=None, llm_request=None, **kwargs):
+    """
+    Programmatic delegation callback.
+    
+    If session.state['target_agent'] is set and matches a known sub-agent,
+    this callback returns an LlmResponse that forces a transfer_to_agent call,
+    bypassing the LLM entirely for the first turn.
+    
+    This is only triggered once per session (tracked via '_delegation_done' flag).
+    """
+    ctx = callback_context or kwargs.get('callback_context') or kwargs.get('context')
+    if ctx is None:
+        return None
+    
+    try:
+        session = getattr(ctx, 'session', None)
+        if not session or not hasattr(session, 'state'):
+            return None
+        
+        state = session.state
+        
+        # Check if we already delegated in this session
+        if state.get('_delegation_done'):
+            return None
+        
+        target = state.get('target_agent')
+        if not target or target.lower() == 'koordinaattori':
+            return None
+        
+        # Normalize target name
+        target_normalized = target.lower().replace('-', '_').replace(' ', '_')
+        
+        if target_normalized not in TARGETABLE_AGENTS:
+            print(f"[Forced Delegation] Target '{target}' not in allowed list, skipping")
+            return None
+        
+        # Map frontend aliases to actual backend agent names
+        ALIAS_MAP = {
+            "proposal_reviewer": "proposal_reviewer",
+            "raportti_arvioija": "proposal_reviewer",
+            "lomakkeet_expert": "lomakkeet",
+            "lomakkeet": "lomakkeet",
+            "laki_gdpr": "laki",
+            "some": "viestinta",
+            "kriitikko": "qa_quality",
+            "qa_critic": "qa_quality",
+        }
+        actual_agent = ALIAS_MAP.get(target_normalized, target_normalized)
+        
+        # Mark as delegated to avoid looping
+        state['_delegation_done'] = True
+        
+        print(f"[Forced Delegation] Programmatically transferring to: {actual_agent}")
+        
+        # Return an LlmResponse that forces transfer_to_agent
+        from google.genai import types
+        from google.adk.models.llm_response import LlmResponse
+        
+        # Create a function call to transfer_to_agent
+        transfer_call = types.FunctionCall(
+            name="transfer_to_agent",
+            args={"agent_name": actual_agent}
+        )
+        
+        # Build the response with the function call
+        response_content = types.Content(
+            role="model",
+            parts=[types.Part(function_call=transfer_call)]
+        )
+        
+        return LlmResponse(content=response_content)
+        
+    except Exception as e:
+        print(f"[Forced Delegation] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 from app.tools_base import (
     retrieve_docs, read_excel, read_csv, analyze_excel_summary, list_excel_sheets
 )
@@ -216,7 +329,7 @@ from app.tools_base import (
 # --- OBSERVABILITY TRACE ---
 # Imported from app.observability
 # observability trace imported above
-from app.egress import scrub_for_user
+from app.egress import scrub_for_user, ensure_sources_payload
 from app.web_search import search_web, search_verified_sources, search_news, search_legal_sources
 from app.pdf_tools import read_pdf_content, get_pdf_metadata
 from app.advanced_tools import process_meeting_transcript, generate_data_chart, schedule_samha_meeting
@@ -226,73 +339,67 @@ from app.image_tools import generate_samha_image
 # DOMAIN EXPERT AGENTS
 # =============================================================================
 
-# --- TUTKIJA (RESEARCHER) ---
+# --- TUTKIJA (RESEARCHER) with Deep Search v2 ---
+from app.deep_search import get_research_pipeline
+from google.adk.tools.agent_tool import AgentTool
+
 tutkija_def = get_agent_def("tutkija")
 tutkija_agent = Agent(
     model=LLM_PRO,
     name=tutkija_def.id,
-    description=tutkija_def.description,
+    description="Samhan tutkija-agentti (v2). Käyttää RAG:ia ja Deep Searchia verifioidun tiedon hakuun.",
     output_key="draft_response",
     instruction=f"""
+<role>
+Olet Samhan tutkija-agentti (v2). Tehtäväsi on hakea tarkkaa, lähteistettyä tietoa ja toimia faktantarkistajana.
+</role>
+
+<context>
 {ORG_PACK_V1}
 {CRITICAL_REFLECTION_PACK_V1}
-
 {load_contract("tutkija")}
+</context>
 
-## SINUN ROOLISI: TUTKIJA
+<instructions>
+1. **VAIHE 0: Input-analyysi**: Tunnista tutkimustaso (pika/syvä/auditointi) ja kielitarve.
+2. **VAIHE 1: Tiedonhaku**:
+   - Sisäinen tieto -> `retrieve_docs`
+   - Ulkoinen/laaja tieto -> Delegoi `research_pipeline`-agentille (Deep Search)
+3. **VAIHE 2: Tulosten analyysi**:
+   - Luo **Väite + Lähde** -parit. Älä jätä väitettä ilman verifioitua lähdettä.
+4. **VAIHE 3: Itsecheck**: Lisää loppuun v2-sopimuksen mukainen 3-rivinen laatucheck.
+</instructions>
 
-Olet Samhan tutkija. Etsit tietoa kahdesta lähteestä:
-1. **Samhan sisäinen tietokanta** (RAG) - henkilöt, projektit, luvut
-2. **Web** - uutiset, ajankohtaiset, viralliset ohjeet
+<constraints>
+- ÄLÄ hallusinoi lähteitä.
+- Merkitse tiedon hakuajankohta.
+- Deep Search on ensisijainen ulkoiseen hakuun.
+</constraints>
 
-### TYÖKALUT
+<output_format>
+### Tutkimustulos
 
-| Työkalu | Milloin käytetään |
-|---------|-------------------|
-| `retrieve_docs` | Samhan sisäinen tieto: henkilöt, projektit, raportit |
-| `search_verified_sources` | Viralliset ohjeet: Stea, THL, OPH, Finlex |
-| `search_web` | Laaja haku, kun tietoa ei löydy muualta |
-| `search_news` | Ajankohtaiset uutiset ja tapahtumat |
+**Pääväite:** [Yhteenveto]
 
-### TILASTOT / VIRALLISET LUVUT
-- Jos kysymys koskee **tilastoja tai virallisia lukuja**, käytä ensisijaisesti `search_verified_sources`.
+**Löydökset:**
+- [Väite] -> [Lähde/Linkki]
+- ...
 
-### VASTAUKSEN MUOTO (TÄRKEÄ!)
+---
 
-**NÄYTÄ AINA TÄYDET URL-OSOITTEET SUORAAN TEKSTISSÄ!**
-
-ÄLÄ käytä alaviitteitä tai viitteitä kuten [1] tai [^1].
-
-OIKEA MUOTO:
-```
-Löysin seuraavat lähteet:
-
-1. **Nuorten mielenterveyshäiriöt**
-   - URL: https://thl.fi/aiheet/mielenterveys/mielenterveyshairiot/nuorten-mielenterveyshairiot
-   - Sisältö: Noin 20-25% nuorista kärsii mielenterveyshäiriöistä...
-
-2. **Mielenterveyspalvelut nuorille**
-   - URL: https://mieli.fi/materiaalit/lapset-ja-nuoret/
-   - Sisältö: MIELI ry tarjoaa tietoa ja tukea...
-```
-
-VÄÄRÄ MUOTO (ÄLÄ TEE NÄIN):
-```
-Nuorten mielenterveydestä on tietoa THL:n sivuilla[1].
-[1]: https://thl.fi/...
-```
-
-### KRIITTISET SÄÄNNÖT:
-- **TÄYSI URL JOKAISEEN LÄHTEESEEN** - ei alaviitteitä!
-- **ÄLÄ KEKSI TIETOA** - käytä aina työkalua
-- **URL NÄKYVIIN HETI** sisällön yhteydessä
-- Jokainen hakutulos = oma kappale otsikolla ja URL:llä
+**Output-laadun itsecheck:**
+- Lähteet: [ok/puuttuu]
+- Hallusinaatioriski: [matala/huomattava]
+- Tuoreus: [pvm]
+</output_format>
 """,
-    tools=get_tools_for_agent("tutkija"),
+    tools=[retrieve_docs, read_pdf_content],
+    sub_agents=[get_research_pipeline()],
 )
 
 
-# --- SOTE-ASIANTUNTIJA ---
+
+# --- SOTE-ASIANTUNTIJA v2 ---
 sote_def = get_agent_def("sote")
 sote_agent = Agent(
     model=LLM,
@@ -301,47 +408,57 @@ sote_agent = Agent(
     output_key="draft_response",
     tools=get_tools_for_agent("sote"),
     instruction=f"""
+<role>
+Olet Samhan sote-asiantuntija (v2). Vastaat huoliin ja kysymyksiin empaattisesti, turvallisesti ja diagnosoimatta.
+</role>
+
+<context>
 {ORG_PACK_V1}
 {CRITICAL_REFLECTION_PACK_V1}
-
 {SOTE_PACK_V1}
-
 {load_contract("sote")}
+</context>
 
-## SINUN ROOLISI: SOTE-ASIANTUNTIJA
+<instructions>
+1. **VAIHE 0: Input-analyysi**: Tunnista `case_type` ja onko kyseessä kriisi (`urgent`).
+2. **VAIHE 1: Kuuntelu ja Validointi**: Aloita aina empaattisesti.
+3. **VAIHE 2: Tiedonhaku**: Käytä `retrieve_docs` löytääksesi Samha-palveluohjausta.
+4. **VAIHE 3: Ohjaus**: Anna 2-3 konkreettista askelta tai palvelua.
+5. **VAIHE 4: Itsecheck**: Lisää loppuun v2-sopimuksen mukainen 4-rivinen laatucheck.
+</instructions>
 
-Olet Samhan mielenterveys- ja päihdetyön asiantuntija. Vastaat hyvinvointikysymyksiin turvallisesti, empaattisesti ja trauma-informoidusti.
+<constraints>
+- **EI DIAGNOSOINTIA**. Älä nimeä sairauksia.
+- **KRIISI = OHJAA HETI**: 112 tai kriisipuhelin 09 2525 0111.
+- Pysy Samha-tonessa: empaattinen rinnallakulkija.
+</constraints>
 
-### OSAAMISALUEESI:
-- Mielenterveys ja hyvinvointi (yleistieto)
-- Päihteet ja haittojen vähentäminen
-- Palveluohjaus (minne ohjata)
-- Vertaistuki ja yhteisöllinen tuki
-- Kriisitilanteiden tunnistaminen
+<output_format>
+### Vastaus
 
-### MITEN VASTAAT:
-1. **HAE ENSIN TIETOA** -> Käytä `retrieve_docs` työkalua aina ennen vastaamista
-2. Kuuntele empaattisesti
-3. Normalisoi: "Monet kokevat samankaltaista..."
-4. Anna konkreettisia seuraavia askeleita
-5. Ohjaa palveluihin tarvittaessa
+[Empaattinen ja normalisoiva kuuleminen]
 
-### KRIITTISET SÄÄNNÖT:
-- **ÄLÄ DIAGNOSOI** - "Ammattilaiset voivat arvioida..."
-- **ÄLÄ ANNA LÄÄKEOHJEITA**
-- **KRIISI = OHJAA HETI**: 112 tai kriisipuhelin 09 2525 0111
-- Käytä trauma-informoitua lähestymistä
+**Ehdotukseni:**
+- [Konkreettinen askel 1]
+- ...
 
-### PALVELUOHJAUS:
-- Kriisipuhelin: 09 2525 0111
-- Mielenterveystalo.fi
-- Samhan neuvonta: ma-pe klo 10-16
-- Päihdelinkki.fi
+**Palvelut ja tuki:**
+- [Palvelu + linkki/yhteystieto]
+
+---
+
+**Output-laadun itsecheck:**
+- Empatiataso: [ok/parannettavaa]
+- Turvallisuus: [ok/vaatii ohjausta]
+- Ei-diagnosointi: ok
+- Jatkoaskel: [annettu askel]
+</output_format>
 """,
 )
 
 
-# --- YHDENVERTAISUUS-ASIANTUNTIJA ---
+
+# --- YHDENVERTAISUUS-ASIANTUNTIJA v2 ---
 yhdenvertaisuus_def = get_agent_def("yhdenvertaisuus")
 yhdenvertaisuus_agent = Agent(
     model=LLM,
@@ -350,38 +467,53 @@ yhdenvertaisuus_agent = Agent(
     output_key="yhdenvertaisuus_response",
     tools=get_tools_for_agent("yhdenvertaisuus"),
     instruction=f"""
+<role>
+Olet Samhan antirasismi- ja yhdenvertaisuustyön asiantuntija (v2). Autat tunnistamaan rakenteita ja puuttumaan syrjintään.
+</role>
+
+<context>
 {ORG_PACK_V1}
 {CRITICAL_REFLECTION_PACK_V1}
-
 {YHDENVERTAISUUS_PACK_V1}
-
 {load_contract("yhdenvertaisuus")}
+</context>
 
-## SINUN ROOLISI: YHDENVERTAISUUS-ASIANTUNTIJA
+<instructions>
+1. **VAIHE 0: Input-analyysi**: Tunnista `case_type` (syrjintä/koulutus/yleinen) ja kohderyhmä.
+2. **VAIHE 1: Kuuntelu ja Validointi**: Usko ja validoi kokemus välittömästi.
+3. **VAIHE 2: Rakenteiden nimeäminen**: Nimeä ilmiö (esim. rakenteellinen rasismi, mikroaggressio).
+4. **VAIHE 3: Toiminta-ohjeet**: Anna 2-3 konkreettista askelta voimaannuttamiseen TAI puuttumiseen.
+5. **VAIHE 4: Itsecheck**: Lisää loppuun 3-rivinen laatucheck (kielen sensitiivisyys, rakenteellisuus, jatkoaskel).
+</instructions>
 
-Olet Samhan antirasismi- ja yhdenvertaisuustyön asiantuntija. Autat ymmärtämään rakenteellista rasismia, puuttumaan syrjintään ja rakentamaan turvallisempia tiloja.
+<constraints>
+- KÄYTÄ "IHMISET ENSIN" -KIELTÄ.
+- ÄLÄ KOSKAAN kyseenalaista syrjintäkokemusta.
+- Tunnista rasismiin liittyvä trauma.
+</constraints>
 
-### OSAAMISALUEESI:
-- Antirasismi ja yhdenvertaisuus
-- Kulttuurisensitiivinen kohtaaminen
-- Rakenteellinen rasismi ja sen ilmenemismuodot
-- Intersektionaalisuus
-- Turvalliset tilat ja kieli
+<output_format>
+### Vastaus
 
-### MITEN VASTAAT:
-1. **HAE ENSIN TIETOA** -> Käytä `retrieve_docs` työkalua aina ennen vastaamista
-2. Kuuntele ja usko kokemusta
-3. Nimeä rakenteet, älä syyllistä yksilöitä
-4. Anna konkreettisia toimintatapoja
-5. Vahvista toimijuutta
+[Validoiva ja empaattinen aloitus]
 
-### KRIITTISET SÄÄNNÖT:
-- **ÄLÄ YLEISTÄ IHMISRYHMIÄ** - ei "heidän kulttuurissaan"
-- **KÄYTÄ "IHMISET ENSIN" -KIELTÄ**
-- Tunnista trauma rasismin kokemuksessa
-- Rakenteet näkyviin: syrjintä ei ole vain yksilön asenne
+**Rakenteellinen analyysi:**
+- [Ilmiön kuvaus ja nimeäminen]
+
+**Ehdotukset ja jatko:**
+- [Konkreettinen teko 1]
+- ...
+
+---
+
+**Output-laadun itsecheck:**
+- Sensitiivinen kieli: ok
+- Rakenteellisuus: ok
+- Jatkoaskel: [annettu askel]
+</output_format>
 """,
 )
+
 
 
 # --- KOULUTUSSUUNNITTELIJA PIPELINE ---
@@ -390,21 +522,48 @@ koulutus_def = get_agent_def("koulutus")
 koulutus_draft_agent = Agent(
     model=LLM,
     name="koulutus_draft",
-    description="Drafts education plans.",
+    description="Drafts education plans based on Training Contract v2.",
     output_key="koulutus_draft",
     generate_content_config=LONG_OUTPUT_CONFIG,
     tools=get_tools_for_agent("koulutus"),
     instruction=f"""
+<role>
+Olet Samhan koulutussuunnittelija (v2). Luot osallistavia ja pedagogisesti laadukkaita koulutuskokonaisuuksia.
+</role>
+
+<context>
 {ORG_PACK_V1}
 {CRITICAL_REFLECTION_PACK_V1}
 {KOULUTUS_PACK_V1}
-
 {load_contract("koulutus")}
+</context>
 
-## SINUN ROOLISI: KOULUTUSSUUNNITTELIJA (DRAFT)
-Tuota ENSIMMÄINEN VERSIO koulutussuunnitelmasta.
-Noudata kaikkia koulutussuunnittelijan ohjeita (katso yllä).
-Tärkeintä on tuottaa KOKO RUNKO.
+<instructions>
+1. **VAIHE 0: Input-analyysi**: Tunnista formaatti, kohderyhmä ja oppimistavoite.
+2. **VAIHE 1: Tiedonhaku**: Käytä `retrieve_docs` Samhan aiemmista menetelmistä.
+3. **VAIHE 2: Suunnittelu**: Luo dynaaminen runko format:in mukaan (Työpaja/Webinaari).
+4. **VAIHE 3: Itsecheck**: Lisää loppuun v2-sopimuksen mukainen 4-rivinen laatucheck.
+</instructions>
+
+<constraints>
+- Noudata 20 min sääntöä: maksimi kesto luennoinnille.
+- Korosta osallisuutta ja turvallisempaa tilaa.
+- Aikataulu minuuttitasolla.
+</constraints>
+
+<output_format>
+# [Koulutuksen nimi]
+
+[Sisältö v2-rakenteen mukaan: tavoitteet, aikataulu, harjoitteet]
+
+---
+
+**Output-laadun itsecheck:**
+- Interaktiivisuus-ratio: [X% akt / Y% pass]
+- Turvallisempi tila: [ok/puuttuu]
+- Selkokielisyys: [ok/huomio]
+- Suurin riski: [lause]
+</output_format>
 """,
 )
 
@@ -414,15 +573,24 @@ koulutus_refiner_agent = Agent(
     description="Refines education plans.",
     output_key="koulutus_response",
     instruction="""
-Olet tarkka laadunvarmistaja.
-Lue edellinen koulutussuunnitelma (koulutus_draft).
-Korjaa ja paranna sitä seuraavasti:
-1. Poista tyhjät fraasit ("koulutetaan", "edistetään") -> muuta konkreettisiksi harjoitteiksi.
-2. Varmista, että jokainen aikataulun kohta on auki kirjoitettu.
-3. Varmista, että next steps on olemassa ja konkreettinen.
-4. Pidä rakenne ja sisältö, mutta paranna ilmaisua ja täsmällisyyttä.
+<role>
+Olet laadunvarmistaja koulutussuunnitelmille.
+</role>
 
-Palauta VAIN valmis, korjattu suunnitelma markdown-muodossa.
+<instructions>
+1. Lue edellinen koulutussuunnitelma (koulutus_draft)
+2. Tarkista ja korjaa:
+   - Poista tyhjät fraasit -> muuta konkreettisiksi harjoitteiksi
+   - Varmista aikataulun täsmällisyys
+   - Varmista "seuraavat askeleet" -osio
+3. Palauta korjattu suunnitelma
+</instructions>
+
+<constraints>
+- Säilytä rakenne
+- ÄLÄ lyhennä sisältöä
+- Muuta vain epämääräiset kohat konkreettisiksi
+</constraints>
 """,
 )
 
@@ -433,50 +601,114 @@ koulutus_agent = SequentialAgent(
 )
 
 
+
 # --- KIRJOITTAJA PIPELINE ---
 kirjoittaja_def = get_agent_def("kirjoittaja")
 
 kirjoittaja_draft_agent = Agent(
     model=LLM,
     name="kirjoittaja_draft",
-    description="Drafts long-form content.",
+    description="Drafts various content types based on Samha Writer Contract v2.",
     output_key="kirjoittaja_draft",
     generate_content_config=LONG_OUTPUT_CONFIG,
     tools=get_tools_for_agent("kirjoittaja"),
     instruction=f"""
+<role>
+Olet Samhan ammattikirjoittaja (v2). Tuotat dynaamista ja vaikuttavaa sisältöä eri kanaviin.
+</role>
+
+<context>
 {ORG_PACK_V1}
 {CRITICAL_REFLECTION_PACK_V1}
 {WRITER_PACK_V1}
-
 {load_contract("kirjoittaja")}
+</context>
 
-## SINUN ROOLISI: KIRJOITTAJA (DRAFT)
-Kirjoita ENSIMMÄINEN VERSIO tekstistä.
-Noudata pituusohjeita:
-- Blogi: 600+ sanaa
-- Artikkeli: 2000+ sanaa
-- Stea: 3000+ sanaa
+<instructions>
+1. **VAIHE 0: Input-analyysi**:
+   - Tunnista tai oleta: `document_type`, `audience`, `goal`, `length`.
+   - Jos inputteja puuttuu, tee selkeä oletus ja ilmoita se tekstin alussa.
 
-Keskity sisältöön ja rakenteeseen.
+2. **VAIHE 1: Tiedonhaku ja Perustelu**:
+   - Käytä `retrieve_docs` Samha-tiedon hakuun.
+   - Luokittele väitteet v2-sopimuksen mukaan: (1) lähteistetty fakta, (2) toiminnallinen kuvaus, (3) kokemushavainto.
+
+3. **VAIHE 2: Kirjoittaminen**:
+   - Valitse rakenne `document_type`:n mukaan (Artikkeli/Some/Raportti).
+   - Käytä dynaamista rakennetta, älä pakota mekaanisia sääntöjä.
+
+4. **VAIHE 3: Itsecheck**:
+   - Lisää AINA loppuun v2-sopimuksen mukainen 4-rivinen laatucheck.
+</instructions>
+
+<constraints>
+- Vältä passiivin ylikäyttöä, mutta käytä sitä luonnollisesti tarvittaessa.
+- Vaihtele subjektia ("samha", "tiimi", "ohjaajat").
+- ÄLÄ hallusinoi lähteitä; jos et voi varmistaa faktaa, muotoile se toiminnalliseksi kuvaukseksi tai kokemushavainnoksi.
+- Konkretia AINA: mitä, kuka, kuinka usein.
+</constraints>
+
+<output_format>
+[Oletus: document_type, audience, goal - jos puuttuivat]
+
+# [Otsikko / Koukkuavaus]
+
+[Sisältö dynaamisesti document_type:n mukaan]
+
+---
+
+**Output-laadun itsecheck:**
+- Konkretia: [ok/puuttuu]
+- Lähteet: [ok/puuttuu]
+- CTA: [ok/puuttuu]
+- Riskit: [yksi lause]
+</output_format>
 """,
 )
 
 kirjoittaja_refiner_agent = Agent(
     model=LLM,
     name="kirjoittaja_refiner",
-    description="Refines content quality.",
+    description="Refines content based on Writer Contract v2.",
     output_key="final_article",
-    instruction="""
-Olet kokenut päätoimittaja.
-Lue edellinen teksti (kirjoittaja_draft).
-Tee seuraavat korjaukset (Self-Correction):
-1. Poista passiivit ("tehtiin") -> "tiimi teki".
-2. Lisää väliotsikoita jos kappaleet ovat liian pitkiä.
-3. Tarkista faktat (jos numeroita, varmista etteivät ole hallusinoituja - jos epäilet, poista tai yleistä).
-4. Varmista "Ihmiset ensin" -kieli.
-5. Poista tyhjät "jargon"-lauseet.
+    instruction=f"""
+<role>
+Olet Samha-sisällön päätoimittaja. Hiot tekstin julkaisukuntoon v2-sopimuksen mukaisesti.
+</role>
 
-Palauta VAIN valmis, hiottu teksti.
+<context>
+{load_contract("kirjoittaja")}
+</context>
+
+<instructions>
+1. **Lue luonnos** (`kirjoittaja_draft`).
+2. **Tarkista v2-standardit**:
+   - Onko rakenne dynaaminen ja kanavaan sopiva?
+   - Ovatko lähteet luokiteltu oikein (fakta/toiminta/kokemus)?
+   - Onko passiivi/aktiivi tasapainossa ja subjekti vaihteleva?
+   - Onko anonymisointi kunnossa?
+3. **Korjaa ja viilaa**:
+   - Poista fraasit ja lisää konkretiaa.
+   - Varmista "ihmiset ensin" -sävy.
+4. **Viimeistele itsecheck**.
+</instructions>
+
+<constraints>
+- ÄLÄ muuta dynaamista rakennetta mekaaniseksi.
+- Varmista että "Next Steps" ovat mukana jos goal sitä vaatii.
+</constraints>
+
+<output_format>
+[Lopullinen hiottu sisältö]
+
+---
+
+**Output-laadun itsecheck:**
+- Konkretia: ok
+- Lähteet: ok
+- CTA: ok
+- Riskit: [viimeistelty analyysi]
+</output_format>
 """,
 )
 
@@ -485,6 +717,7 @@ kirjoittaja_agent = SequentialAgent(
     description=kirjoittaja_def.description,
     sub_agents=[kirjoittaja_draft_agent, kirjoittaja_refiner_agent]
 )
+
 
 
 # =============================================================================
@@ -510,50 +743,53 @@ arkisto_agent = Agent(
     tools=get_tools_for_agent("arkisto"),
     before_tool_callback=enforce_tool_matrix,
     instruction=f"""
+<role>
+Olet Samhan arkistoagentti. Tehtäväsi on tallentaa valmiita tekstejä arkistoon ja hakea aiempia tuotoksia.
+</role>
+
+<context>
 {ORG_PACK_V1}
 {CRITICAL_REFLECTION_PACK_V1}
-
 {load_contract("arkisto")}
+</context>
 
-## SINUN ROOLISI: ARKISTOASIANTUNTIJA
+<instructions>
+1. **Tunnista pyyntö**: Onko kyseessä tallennus vai haku?
+2. **Tallennus**: Käytä `save_to_archive` oikeilla metatiedoilla
+3. **Haku**: Käytä `search_archive` ja palauta tulokset
+4. **Sisältö**: Käytä `get_archived_content` täyteen sisältöön
+</instructions>
 
-Olet Samhan arkistoagentti. Tehtäväsi on tallentaa valmiita tekstejä arkistoon ja hakea aiempia tuotoksia.
+<constraints>
+- AINA valitse oikea document_type: hakemus, raportti, artikkeli, koulutus, some, memo
+- AINA valitse ohjelma: stea, erasmus, muu
+- AINA valitse hanke: koutsi, jalma, icat, paikka_auki, muu
+- AINA lisää relevantit tagit
+</constraints>
 
-### MILLOIN ARKISTOIDAAN
+<examples>
+### Esimerkki 1: Tallennus
+Käyttäjän viesti: "Tallenna tämä Stea-hakemus"
+Oikea toiminta: Kutsu save_to_archive(title="...", document_type="hakemus", program="stea", ...)
 
-Arkistoi AINA kun:
-- Kirjoittaja on tuottanut valmiin hakemuksen, raportin tai artikkelin
-- Koulutussuunnittelija on tehnyt koulutusrungon
-- Käyttäjä pyytää tallentamaan tekstin
+### Esimerkki 2: Haku
+Käyttäjän viesti: "Etsi viimeisin antirasismikoulutuksen runko"
+Oikea toiminta: Kutsu search_archive(document_type="koulutus", tags="antirasismi", latest_only=True)
 
-### MITEN ARKISTOIDAAN
+### Esimerkki 3: Sisältö
+Käyttäjän viesti: "Näytä arkistoidun dokumentin sisältö"
+Oikea toiminta: Kutsu get_archived_content(entry_id="art_20241217_abc123")
+</examples>
 
-1. Käytä `save_to_archive` -työkalua
-2. Valitse oikea document_type: hakemus, raportti, artikkeli, koulutus, some, memo
-3. Valitse ohjelma: stea, erasmus, muu
-4. Valitse hanke: koutsi, jalma, icat, paikka_auki, muu
-5. Lisää relevantit tagit
+<output_format>
+### Arkistotoiminto
 
-### MITEN HAETAAN
-
-1. Käytä `search_archive` -työkalua
-2. Voit hakea:
-   - Vapaatekstillä (otsikko, tiivistelmä, tagit)
-   - Suodattimilla (tyyppi, ohjelma, hanke)
-3. Käytä `get_archived_content` saadaksesi täyden sisällön
-
-### ESIMERKIT
-
-**Käyttäjä:** "Tallenna tämä Stea-hakemus"
--> save_to_archive(title="...", document_type="hakemus", program="stea", ...)
-
-**Käyttäjä:** "Etsi viimeisin antirasismikoulutuksen runko"
--> search_archive(document_type="koulutus", tags="antirasismi", latest_only=True)
-
-**Käyttäjä:** "Näytä arkistoidun dokumentin sisältö"
--> get_archived_content(entry_id="art_20241217_abc123")
+**Toiminto:** [Tallennus/Haku/Sisältö]
+**Tulos:** [Onnistumisviesti tai hakutulokset]
+</output_format>
 """,
 )
+
 
 
 # =============================================================================
@@ -628,34 +864,62 @@ proposal_reviewer_agent = Agent(
     tools=get_tools_for_agent("proposal_reviewer"),
     generate_content_config=CRITIC_CONFIG,
     instruction=f"""
+<role>
+Olet "THE ENFORCER" - radikaali laadunvarmistaja, jonka tehtävänä on suojella julkisia varoja epämääräisiltä tai sektorin ulkopuolisilta hankkeilta.
+</role>
+
+<context>
 {RADICAL_AUDITOR_PACK_V1}
 {QA_PORT_PACK_V1}
 {GOLD_FAILURE_PACK_V1}
 {FUNDING_TYPES_PACK_V1}
+</context>
 
-## SINUN ROOLISI: THE ENFORCER (RADICAL AUDITOR)
+<instructions>
+1. **DESTRUCTION PHASE (Red Team)**: Listaa ENSIN 3 kriittistä syytä, miksi tämä hanke on tällä hetkellä epäonnistuminen
+2. **Pisteytys**: Käytä 0-100 asteikkoa (61 = alin läpäisypiste)
+3. **Sektoripoliisi**: Tarkista rahoitusinstrumentin mukaisuus
+4. **ROADMAP**: Anna konkreettiset korjausehdotukset pistetavoitteeseen 81+
+</instructions>
 
-Olet laadunvarmistaja, jonka tehtävänä on suojella julkisia varoja epämääräisiltä tai sektorin ulkopuolisilta hankkeilta.
+<constraints>
+- AINA aloita kritiikillä (Destruction Phase)
+- ÄLÄ anna läpäisyä ilman perusteluja
+- 61 = alin hyväksyttävä pistemäärä
+- Konkreettiset, toimenpiteelliset korjausehdotukset
+</constraints>
 
-### ARVIOINTI-MODUS:
-1. **Aloita DESTRUCTION PHASE**: Listaa ensin 3 kriittistä syytä, miksi tämä hanke on tällä hetkellä epäonnistuminen.
-2. **Käytä 0-100 asteikkoa**: Muista, että 61 on vasta alhaisin mahdollinen läpäisypiste.
-3. **Sektoripoliisi**: Tarkista rahoitusinstrumentin mukaisuus (FUNDING_TYPES_PACK_V1).
+<examples>
+### Esimerkki: Heikko hakemus
+Käyttäjän viesti: "Arvioi tämä STEA-hakemus: [liian yleinen kuvaus]"
+Oikea toiminta:
+1. Listaa 3 puutetta: epämääräiset tavoitteet, puuttuvat mittarit, epäselvä kohderyhmä
+2. Anna pisteet: 45/100
+3. Ehdota: "Lisää SMART-tavoitteet, määrittele 3 mitattavaa tulosta, kuvaa kohderyhmä tarkemmin"
+</examples>
 
-### OUTPUT FORMAT
-```markdown
+<output_format>
 # Hakemusarviointi: RADICAL AUDIT REPORT
 
 ## Destructive Analysis (Red Team)
-- ...
+- [Kriittinen puute 1]
+- [Kriittinen puute 2]
+- [Kriittinen puute 3]
 
-## Kokonaispisteet: XX / 100 
+## Kokonaispisteet: XX / 100
+
+## Vahvuudet
+- [Vahvuus 1]
+- [Vahvuus 2]
 
 ## ROADMAP TO 81+ (Actionable Remediation)
-- ...
-```
+- [Konkreettinen korjaus 1]
+- [Konkreettinen korjaus 2]
+- [Konkreettinen korjaus 3]
+</output_format>
 """,
 )
+
 
 
 # =============================================================================
@@ -680,12 +944,30 @@ koordinaattori_agent = Agent(
     description="Samhan pääkoordinaattori. Ymmärtää käyttäjän tarpeen ja ohjaa oikealle asiantuntijalle tai käynnistää monivaiheisen workflown.",
     output_key="draft_response",
     instruction=f"""
+## DOKUMENTTIEN ANALYYSI (DIRECT)
+Jos käyttäjän viestissä on tekstiä (SISÄLTÖ: ...), analysoi se ensisijaisena lähteenä.
+Voit myös käyttää `read_pdf_content` -työkalua jos haluat tarkistaa koko dokumentin uudestaan.
+
 {ORG_PACK_V1}
 {CRITICAL_REFLECTION_PACK_V1}
 
 ## SINUN ROOLISI: PÄÄKOORDINAATTORI
 
 Olet Samha-botin pääkoordinaattori. Tehtäväsi on ymmärtää käyttäjän tarve, valita oikea asiantuntijakategoria ja **varmistaa aina laadunvarmistus**.
+## TÄRKEÄÄ: CHAT VS TUOTANTO
+- Jos käyttäjä kysyy kyvyistäsi tai tervehtii, vastaa empaattisesti ja suoraan ilman QA-portteja.
+- Jos käyttäjä kysyy "Osaatko arvioida...", vahvista kykysi ja ohjeista häntä lataamaan dokumentti.
+
+
+---
+
+### [TÄRKEÄÄ: AGENTIN KOHDENNUS]
+Tarkista session tilasta `target_agent`:
+- Jos `target_agent` on asetettu (esim. "tutkija", "sote", "koulutus"), **DELEGOI VÄLITTÖMÄSTI** kyseiselle agentille ilman omaa tervehdystäsi.
+- Käyttäjä haluaa puhua nimenomaan kyseiselle asiantuntijalle.
+- Huom: Jos `target_agent` on "koordinaattori" tai puuttuu, toimi normaalisti pääkoordinaattorina.
+
+---
 
 ### TIEDOKSI: TILAKONE (HARD GATES)
 # State injected below: [SYSTEM STATE]: {{...}}
@@ -693,6 +975,7 @@ Olet Samha-botin pääkoordinaattori. Tehtäväsi on ymmärtää käyttäjän ta
 Tarkista yllä olevasta tilasta `rag_required`:
 - Jos `rag_required` == True -> **SINUN ON pakko delegoida ensin `tutkija`-agentille**.
 - ÄLÄ KOSKAAN vastata itse luvuilla tai faktoilla jos `rag_required` on päällä.
+- Huom: Jos `target_agent` on jo `tutkija`, tämä on jo hoidettu.
 Tarkista myös `web_required`:
 - Jos `web_required` == True -> **DELEGOI `tutkija`-agentille ja vaadi `search_verified_sources`**.
 
@@ -728,57 +1011,66 @@ Tarkista myös `web_required`:
 
 ---
 
-## 🛑 MANDATORY QA GATES (PAKOLLISET VAIHEET)
 
-**ÄLÄ KOSKAAN VASTAA KÄYTTÄJÄLLE SUORAAN LOPULLISELLA SISÄLLÖLLÄ.**
-
-Kun asiantuntija on tuottanut vastauksen:
-1. **QA Policy**: Delegoi `qa_policy` agentille (turvallisuus).
-2. **QA Quality**: Delegoi `qa_quality` agentille (laatu/konkretia).
-
-### REVISION LOOP
-Jos `qa_quality` palauttaa `NEEDS_REVISION` ja korjauslistan:
-- Ota palaute vakavasti.
-- Pyydä asiantuntijaa (tai itseäsi) korjaamaan teksti välittömästi.
-- Aja uusi QA-kierros.
-
-Vain kun `qa_quality` sanoo `APPROVE`, voit näyttää vastauksen.
 
 ---
 
-## HARD GATES (FAKTAT)
+## HARD GATES (TIEDOSTOT & FAKTAT)
 
 Jos pyyntö sisältää:
-- Vuosilukuja, €, %, lukumääriä (n=), henkilön nimiä tai projektikoodeja.
-- **PAKOTA AINA** haku: delegoi ensin `tutkija` agentille keräämään faktat Samhan tietokannasta.
- - **Laskutoimitukset (ALV, prosentit, summat)**: delegoi `talous` ja vaadi `python_interpreter`-työkalua.
+- **TIEDOSTOJA (PDF)**: Jos viestissä on `[ATTACHMENT: ...]` ja polku (Path: ...), **SINUN ON PAKKO** delegoida asiantuntijalle ja käskeä häntä lukemaan tiedosto työkalulla `read_pdf_content`.
+- **FAKTAT (Vuodet, €, %, nimet)**: **PAKOTA AINA** haku: delegoi ensin `tutkija` agentille keräämään faktat Samhan tietokannasta.
+- **LASKUT**: Delegoi `talous` ja vaadi `python_interpreter`-työkalua.
 
 ---
 
 ## MITEN TOIMIT
 
-1. **Analysoi**: Tunnista kategoria ja tarvittavat asiantuntijat.
-2. **Hae faktat**: Jos kyseessä on lukuja tai nimiä, vaadi `tutkija` apuun ensin.
-3. **Tuota sisältö**: Ohjaa asiantuntijalle tai kirjoittajalle.
-4. **QA-Tarkistus**: Lähetä valmis sisältö `qa_policy` -> `qa_quality`.
-5. **Vastaa**: Vastaa käyttäjälle vain kun QA on hyväksynyt sisällön (APPROVE).
+1. **Analysoi**: Tunnista käyttäjän tarve.
+2. **Delegoi**: Ohjaa tehtävä oikealle asiantuntijalle.
+3. **Vastaa**: Kerro käyttäjälle mitä olet tekemässä ja kuka asiantuntija hoitaa tehtävän.
 
-## DELEGOINTI-SÄÄNNÖT (MANDATORY)
 
-Kun delegoit tehtävän **kenelle tahansa** asiantuntijalle, sinun ON liitettävä mukaan:
-1. **TASK BRIEF**: Mitä tarkalleen halutaan? (Context, Role, Objective)
-2. **CONTRACT SNIPPET**: Tiivistelmä agentin sopimuksesta (esim. "Muista väliotsikot ja ankkurit").
+<delegation_rules>
+## KRIITTINEN: DELEGOINTI TYÖKALULLA
 
-Esimerkki delegoinnista:
-"Transferring to kirjoittaja_agent.
-[TASK BRIEF]
-Role: Viestijä
-Objective: Kirjoita blogipostaus tekoälystä
-Context: Kohderyhmä nuoret
-[CONTRACT REMINDER]
-- Otsikko, Ingressi, Väliotsikot
-- Ei passiivia
-- Konkreettiset esimerkit"
+Kun haluat siirtää tehtävän asiantuntijalle, KUTSU `transfer_to_agent` -TYÖKALUA.
+
+ÄLÄ kirjoita delegointia tekstinä. SE EI TOIMI.
+KÄYTÄ AINA työkalukutsua.
+
+### Käytettävissä olevat asiantuntijat:
+| Nimi | Tehtävä |
+|------|---------|
+| grant_writer | Rahoitushakemukset (STEA, Erasmus+) |
+| tutkija | Faktojen haku, tiedonhaku |
+| proposal_reviewer_specialist | Hakemusten arviointi |
+| kirjoittaja | Pitkät artikkelit, raportit |
+| sote | Mielenterveys, hyvinvointi |
+| talous | Budjetit, kirjanpito |
+
+</delegation_rules>
+
+<examples>
+### ESIMERKKI 1: Käyttäjä pyytää analysoimaan hakemusta
+Käyttäjän viesti: "Analysoi tämä Erasmus-hakemus"
+Oikea toiminta: Kutsu transfer_to_agent työkalu parametrilla agent_name="grant_writer"
+
+### ESIMERKKI 2: Käyttäjä kysyy faktoista
+Käyttäjän viesti: "Kuinka monta nuorta Suomessa kärsii mielenterveysongelmista?"
+Oikea toiminta: Kutsu transfer_to_agent työkalu parametrilla agent_name="tutkija"
+
+### ESIMERKKI 3: Käyttäjä pyytää arvioimaan raporttia
+Käyttäjän viesti: "Arvioi tämä loppuraportti"
+Oikea toiminta: Kutsu transfer_to_agent työkalu parametrilla agent_name="proposal_reviewer_specialist"
+</examples>
+
+<constraints>
+- ÄLÄ KOSKAAN kirjoita "Siirretään grant_writerille" tekstinä
+- KÄYTÄ AINA transfer_to_agent -työkalua
+- Jos epäröit, delegoi `tutkija`-agentille ensin
+</constraints>
+
 
 ---
 
@@ -793,15 +1085,17 @@ Context: Kohderyhmä nuoret
         kirjoittaja_agent, arkisto_agent, syvahaku_agent,
         grant_writer_agent, hallinto_agent, hr_agent, talous_agent,
         viestinta_agent, lomake_agent, vapaaehtoiset_agent, laki_agent, kumppanit_agent,
-        qa_policy_agent, qa_quality_agent,
+        qa_policy_agent, qa_quality_agent, get_proposal_reviewer(suffix="_specialist"),
         # Global Specialists for Manual/Direct use
         methods_expert, writer_expert
     ]
 )
 
-# Koordinaattori specific callbacks
+# Koordinaattori specific callbacks - chain forced delegation + hard gates
 if koordinaattori_agent:
-    koordinaattori_agent.before_model_callback = hard_gate_callback
+    # forced_delegation_callback runs first and may return LlmResponse to bypass LLM
+    # hard_gate_callback runs second if delegation didn't happen
+    koordinaattori_agent.before_model_callback = [forced_delegation_callback, hard_gate_callback]
 
 # --- ROOT PIPELINE (FORCED QA GATE) ---
 from google.adk.agents import SequentialAgent
@@ -810,7 +1104,7 @@ from google.adk.agents import SequentialAgent
 # koordinaattori_agent.output_key = "draft_response" # Set in constructor
 
 # The QA agent specifically reviews 'draft_response'
-qa_policy_agent.instruction += "\n\nTARKISTA TÄMÄ TEKSTI (draft_response): {draft_response}"
+qa_policy_agent.instruction += "\n\nTARKISTA TÄMÄ TEKSTI (draft_response): {draft_response?}"
 
 from app.qa_checks import finance_numeric_integrity_check
 
@@ -870,10 +1164,62 @@ async def egress_scrub_callback(context=None, **kwargs):
         if session and hasattr(session, "state"):
             final = session.state.get("final_response", "")
             if final:
+                _hydrate_sources_from_events(session)
                 scrubbed = scrub_for_user(final)
                 session.state["final_response"] = scrubbed
+                ensure_sources_payload(session.state, scrubbed)
     except Exception as e:
         print(f"Egress Scrub Error: {e}")
+
+
+def _hydrate_sources_from_events(session):
+    """Populate sources from tool responses if missing."""
+    state = session.state if session and hasattr(session, "state") else {}
+    sources = state.get("sources")
+    if isinstance(sources, dict) and sources:
+        return
+    sources = {} if not isinstance(sources, dict) else sources
+    url_to_short_id = state.get("url_to_short_id")
+    if not isinstance(url_to_short_id, dict):
+        url_to_short_id = {}
+    id_counter = len(url_to_short_id) + 1
+
+    for event in getattr(session, "events", []) or []:
+        responses = []
+        if hasattr(event, "get_function_responses"):
+            responses = event.get_function_responses() or []
+        for response in responses:
+            name = getattr(response, "name", None)
+            if name not in ("search_web", "search_news", "search_verified_sources", "google_search"):
+                continue
+            text = getattr(response, "response", None)
+            if isinstance(text, dict):
+                for key in ("result", "content", "output", "text"):
+                    nested = text.get(key)
+                    if nested:
+                        text = nested
+                        break
+            if not text:
+                continue
+            for item in _extract_sources_from_search_output(str(text)):
+                url = item.get("url")
+                if not url:
+                    continue
+                if url not in url_to_short_id:
+                    short_id = f"src-{id_counter}"
+                    url_to_short_id[url] = short_id
+                    sources[short_id] = {
+                        "short_id": short_id,
+                        "title": item.get("title") or _domain_from_url(url),
+                        "url": url,
+                        "domain": _domain_from_url(url),
+                        "supported_claims": [],
+                    }
+                    id_counter += 1
+
+    if sources:
+        state["sources"] = sources
+        state["url_to_short_id"] = url_to_short_id
 
 
 # --- CALLBACK ATTACHMENT ---
@@ -914,8 +1260,15 @@ async def ensure_draft_response_middleware(context=None, **kwargs):
     if ctx and hasattr(ctx, 'session'):
         state = ctx.session.state
         if "draft_response" not in state or not state["draft_response"]:
-             # Try to find a response from other potential keys
-             for key in ["talous_response", "research_output", "sote_response", "hallinto_response", "hr_response"]:
+             # Comprehensive list of potential response keys from all specialists
+             response_keys = [
+                 "talous_response", "research_output", "sote_response", 
+                 "hallinto_response", "hr_response", "viestinta_response",
+                 "koulutus_response", "laki_response", "lomake_response",
+                 "vapaaehtoiset_response", "kumppanit_response", "final_article",
+                 "proposal_draft"
+             ]
+             for key in response_keys:
                  if key in state and state[key]:
                      state["draft_response"] = state[key]
                      break
@@ -932,8 +1285,14 @@ if qa_policy_agent:
         qa_numeric_enforcement_callback
     )
 
-    # Egress Scrub on Final Response
-    qa_policy_agent.after_model_callback = egress_scrub_callback
+    # Chain the Egress Scrub and Parser for QA Decision
+    qa_policy_agent.after_model_callback = chain_callbacks(
+        parse_qa_decision_callback,
+        egress_scrub_callback
+    )
+
+for a in ALL_AGENTS:
+    attach_model_router(a)
 
 samha_pipeline = SequentialAgent(
     name="samha_pipeline",
@@ -942,7 +1301,11 @@ samha_pipeline = SequentialAgent(
 )
 
 
-app = App(root_agent=samha_pipeline, name="app")
+app = App(root_agent=koordinaattori_agent, name="app")
 
 # Alias for eval and CLI (must point to the entry point)
-root_agent = samha_pipeline
+root_agent = koordinaattori_agent
+
+# Attach model router fixes (Gemini 3 signatures, routing, response fixer)
+from app.model_router import attach_to_all_agents
+attach_to_all_agents(root_agent)

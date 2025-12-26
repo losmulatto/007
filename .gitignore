@@ -197,3 +197,9 @@ my_env.tfvars
 
 # A2A Inspector
 tools/a2a-inspector/
+
+# Eval outputs
+eval_report_*.json
+
+# Local uploads
+uploads/

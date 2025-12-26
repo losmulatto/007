@@ -63,5 +63,6 @@ FUNCTION_NAME_TO_TOOL_ID = {
     "translate_text": ToolId.TRANSLATE,
     "format_social_post": ToolId.FORMAT_SOCIAL,
     "create_newsletter_section": ToolId.CREATE_NEWSLETTER,
-    "transfer_to_agent": ToolId.TRANSFER
+    "transfer_to_agent": ToolId.TRANSFER,
+    "siirretään_agentille": ToolId.TRANSFER
 }

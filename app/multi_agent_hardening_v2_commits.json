@@ -1,0 +1,44 @@
+{
+    "commits": [
+        {
+            "order": 1,
+            "title": "feat: add qa_quality agent + wiring",
+            "description": "Implementoi qa_quality agent sekä tarvittavat integraatiot."
+        },
+        {
+            "order": 2,
+            "title": "feat: add quality_lint + callback",
+            "description": "Lisää ei-llm quality_lint ja callback-lokituksen pipelineen."
+        },
+        {
+            "order": 3,
+            "title": "feat: add revision loop (max 1)",
+            "description": "Lisää revision loop joka tekee yhden automaattisen korjauskierroksen onnistumisen varmistamiseksi."
+        },
+        {
+            "order": 4,
+            "title": "feat: contracts + task brief + coordinator integration",
+            "description": "Lisää contractit, task brief sekä integraatio koordinaattorille."
+        },
+        {
+            "order": 5,
+            "title": "feat: output self-refinement pipelines",
+            "description": "Implementoi self-refinement pipeline output-agentteihin."
+        },
+        {
+            "order": 6,
+            "title": "test: add quality assertions + targeted suite",
+            "description": "Lisää quality assertions ja targeted eval suite."
+        },
+        {
+            "order": 7,
+            "title": "fix: tool_traces persistent in session.state",
+            "description": "Varmista että tool_traces tallentuu pysyvästi session.state:een."
+        },
+        {
+            "order": 8,
+            "title": "chore: update registry + tool_ids",
+            "description": "Päivitä registry ja tool-id:t ajan tasalle."
+        }
+    ]
+}

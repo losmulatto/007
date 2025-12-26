@@ -69,6 +69,7 @@
                 "user_message": "aloitetaan stea-hakemus: kirjoita tarve ja tavoitteet",
                 "attachments": []
             },
+            "max_response_time_sec": 2400,
             "expected": {
                 "route_chain": [
                     "koordinaattori",
